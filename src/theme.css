@@ -1,0 +1,138 @@
+/* ------------------------------------------------------------------
+   Dark theme
+   The approved design is light-first. This layer redefines the surface
+   tokens and keeps the coral/pastel hero areas and ABI chips intact.
+   ------------------------------------------------------------------ */
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0A141C;
+  --surface: #101C26;
+  --surface-raised: #14212C;
+  --soft: #15232E;
+  --soft-warm: #15232E;
+  --tint: #1A2935;
+  --line: #26343F;
+  --line-soft: #1E2B36;
+  --line-strong: #2D3D49;
+  --line-coral: #6B3A34;
+  --line-danger: #6A3A34;
+  --track: #22313D;
+  --scroll: #2B3B47;
+  --mute: #9FB0BC;
+  --ink: #F3EDE9;
+  --ink-soft: #C7D3DB;
+  --danger: #FF9184;
+  --warn-ink: #F0C66B;
+  --ok-ink: #6FE0B4;
+  --ok-bg: rgba(31, 169, 123, .16);
+  --ok-dot: #3BD69B;
+  --coral-wash: rgba(255, 79, 64, .2);
+  --selection: #5A2A26;
+  --shadow: 0 14px 40px rgba(0, 0, 0, .45);
+}
+
+/* Coral and pastel surfaces stay exactly as approved; their ink stays navy. */
+html[data-theme="dark"] .lsum,
+html[data-theme="dark"] .mast,
+html[data-theme="dark"] .atint,
+html[data-theme="dark"] .dhero,
+html[data-theme="dark"] .rail { color: var(--navy); }
+
+html[data-theme="dark"] .rail button:hover,
+html[data-theme="dark"] .rail button.on:hover { color: var(--navy); }
+
+html[data-theme="dark"] .mast .mhero h1 { color: #fff; }
+html[data-theme="dark"] .mast .mhero h1 em { color: var(--navy); }
+html[data-theme="dark"] .dback,
+html[data-theme="dark"] .dnav .dib { color: var(--navy); }
+html[data-theme="dark"] .dback:hover,
+html[data-theme="dark"] .dnav .dib:hover { background: rgba(255, 255, 255, .92); }
+
+/* Pills that sit on pastel heroes keep their light treatment. */
+html[data-theme="dark"] .tag { background: rgba(255, 255, 255, .92); color: var(--navy); }
+html[data-theme="dark"] .tag.hot { background: var(--navy); color: var(--cream); }
+html[data-theme="dark"] .tag.draft { background: rgba(255, 255, 255, .92); color: #8A6A00; }
+
+/* Inverse controls become light-on-dark. */
+html[data-theme="dark"] .chip.on { background: var(--cream); color: var(--navy); }
+html[data-theme="dark"] .chip.on.ab { background: var(--coral-deep); color: #fff; }
+html[data-theme="dark"] .abi.u { background: var(--cream); color: var(--navy); }
+html[data-theme="dark"] .mxcell .mchip.u { background: var(--cream); color: var(--navy); }
+html[data-theme="dark"] .mxcell .mchip.u.def::after { background: var(--coral-deep); }
+html[data-theme="dark"] .lane.u { background: var(--cream); color: var(--navy); }
+html[data-theme="dark"] .mini.navy { background: var(--cream); color: var(--navy); }
+html[data-theme="dark"] .btn-dark { background: var(--cream); color: var(--navy); }
+html[data-theme="dark"] .btn-dark:hover { background: #fff; }
+html[data-theme="dark"] .toast { background: var(--cream); color: var(--navy); }
+html[data-theme="dark"] .toast i { background: var(--ok-dot); }
+html[data-theme="dark"] .toast.err i { background: var(--coral-deep); }
+
+/* Small surfaces that need a deliberate dark equivalent. */
+html[data-theme="dark"] .chip:hover,
+html[data-theme="dark"] .btn-quiet:hover,
+html[data-theme="dark"] .mini:hover,
+html[data-theme="dark"] .art .dl:hover { background: #223440; }
+html[data-theme="dark"] .drop.hot { background: #2A1C1A; }
+html[data-theme="dark"] .appcard:hover { border-color: #5A3B36; }
+html[data-theme="dark"] .ver.latest { border-color: #6B3A34; }
+html[data-theme="dark"] .ver.draft { background: #121F29; }
+html[data-theme="dark"] .badge.d {
+  background: rgba(240, 198, 107, .14);
+  color: var(--warn-ink);
+  border-color: rgba(240, 198, 107, .35);
+}
+html[data-theme="dark"] .art .def { color: #FF9B90; background: rgba(255, 79, 64, .2); }
+html[data-theme="dark"] .mini.danger { color: var(--danger); border-color: var(--line-danger); }
+html[data-theme="dark"] .mini.danger:hover { background: rgba(255, 79, 64, .12); }
+html[data-theme="dark"] .listbody::-webkit-scrollbar-thumb { border-color: var(--surface); }
+html[data-theme="dark"] .detail::-webkit-scrollbar-thumb { border-color: var(--bg); }
+html[data-theme="dark"] .overlay { background: rgba(0, 0, 0, .62); }
+html[data-theme="dark"] .health i { box-shadow: 0 0 0 3px rgba(59, 214, 155, .16); }
+html[data-theme="dark"] .healthrow .ok { background: var(--ok-bg); color: var(--ok-ink); }
+html[data-theme="dark"] .btn-primary { background: #E2452F; }
+html[data-theme="dark"] .btn-primary:hover { background: var(--coral); }
+html[data-theme="dark"] .gsearch2 kbd,
+html[data-theme="dark"] .gsearch kbd { background: var(--tint); }
+html[data-theme="dark"] .rail .logo,
+html[data-theme="dark"] .mlogo { box-shadow: 0 6px 16px rgba(0, 0, 0, .28); }
+html[data-theme="dark"] .rail button.on { box-shadow: 0 4px 14px rgba(0, 0, 0, .3); }
+html[data-theme="dark"] .mx { border-color: var(--line); }
+html[data-theme="dark"] .mxcell .mchip.na { background: var(--surface-raised); }
+html[data-theme="dark"] .lane.na { background: var(--surface-raised); }
+html[data-theme="dark"] .dstat { background: var(--surface-raised); }
+html[data-theme="dark"] .field input,
+html[data-theme="dark"] .field select,
+html[data-theme="dark"] .field textarea { background: var(--surface-raised); }
+html[data-theme="dark"] .field input:focus,
+html[data-theme="dark"] .field select:focus,
+html[data-theme="dark"] .field textarea:focus { background: var(--surface); }
+
+/* Detail hero: keep the app tint but pull it into the dark surface so the
+   page does not flip from a bright pastel header to a dark sheet. */
+html[data-theme="dark"] .dhero {
+  color: var(--cream);
+  background: linear-gradient(rgba(10, 20, 28, .82), rgba(10, 20, 28, .82)), var(--tint);
+}
+html[data-theme="dark"] .dhero::after { background: rgba(255, 255, 255, .08); }
+html[data-theme="dark"] .dnav .dev,
+html[data-theme="dark"] .dident .pk { color: rgba(255, 241, 237, .78); }
+html[data-theme="dark"] .dback,
+html[data-theme="dark"] .dnav .dib {
+  background: rgba(255, 255, 255, .14);
+  color: var(--cream);
+}
+html[data-theme="dark"] .dback:hover,
+html[data-theme="dark"] .dnav .dib:hover { background: rgba(255, 255, 255, .26); }
+html[data-theme="dark"] .dident .icon-tile { background: rgba(255, 255, 255, .14); }
+html[data-theme="dark"] .dident .icon-tile .letter { color: var(--cream); }
+html[data-theme="dark"] .dhero .tag.hot { background: var(--coral-deep); color: #fff; }
+
+/* Navy fills disappear on a navy panel; use cream for the inverse meters. */
+html[data-theme="dark"] .cov .bar.u i,
+html[data-theme="dark"] .meter.u i { background: var(--cream); }
+html[data-theme="dark"] .meter.u { background: var(--track); }
+
+/* Neutral ABI chips should not glow bright in dark mode. */
+html[data-theme="dark"] .abi.draft,
+html[data-theme="dark"] .abi.more,
+html[data-theme="dark"] .abi.armeabi { background: var(--tint); color: var(--mute); }

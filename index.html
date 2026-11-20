@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="vi" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Bảng quản trị My TestFlight — thư viện APK nội bộ, phiên bản, kiến trúc ABI và cài đặt kết nối máy chủ.">
+  <title>My TestFlight — Quản trị</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23FF4F40'/%3E%3Ctext x='32' y='45' font-family='Arial,Helvetica,sans-serif' font-size='38' font-weight='800' fill='%23FFF1ED' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>
+    // Apply the saved theme before the first paint.
+    try {
+      if (localStorage.getItem('mytestflight.dashboard.theme.v1') === 'dark') {
+        document.documentElement.dataset.theme = 'dark';
+      }
+    } catch (e) { /* storage can be unavailable */ }
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
