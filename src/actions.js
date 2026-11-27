@@ -35,9 +35,15 @@ import {
   openVersionForm,
   removeUploadFile,
   updateIconPreview,
+  updateUploadAlertsDOM,
   updateUploadProgressDOM,
   validateVersionName,
 } from "./modals.js";
+import {
+  computeAllowMismatch,
+  refreshUploadValidation,
+  validateUploadFiles,
+} from "./upload-plan.js";
 import { renderSettingsStats } from "./views/settings.js";
 import { renderListResults } from "./views/list.js";
 import { renderVersionList } from "./views/detail.js";
@@ -285,16 +291,19 @@ function readIconFile(file) {
   reader.readAsDataURL(file);
 }
 
-function addFiles(fileList) {
-  const result = addFilesToUpload(state, fileList);
-  if (!result.added && !result.replaced && !result.rejected) return;
-  rerenderModal();
-  if (result.rejected && !result.added && !result.replaced) {
-    toast("Chỉ nhận tệp .apk.", "error");
+async function addFiles(fileList) {
+  const result = await addFilesToUpload(state, fileList, { onUpdate: rerenderModal });
+  if (!result.added && !result.rejected) return;
+  if (result.rejected && !result.added) {
+    toast("Chỉ nhận tệp .apk (hoặc tệp đã có trong danh sách).", "error");
     return;
   }
-  if (result.replaced) toast("Đã thay tệp cho ABI trùng.");
-  else if (result.added) toast(`Đã nhận ${result.added} tệp.`);
+  if (result.failed) {
+    toast(`${result.failed} tệp không đọc được — xem lỗi trong hộp thoại.`, "error");
+  } else if (result.added) {
+    toast(result.added === 1 ? "Đã đọc 1 APK." : `Đã đọc ${result.added} APK.`);
+  }
+  rerenderModal();
 }
 
 /* ----------------------------------------------------------------- upload */
@@ -316,6 +325,22 @@ async function startUpload() {
     rerenderModal();
     return;
   }
+  if (upload.files.some((file) => file.status === "inspecting") || upload.inspecting) {
+    upload.error = "Đang đọc metadata APK. Chờ đọc xong rồi thử lại.";
+    rerenderModal();
+    return;
+  }
+
+  const validation = validateUploadFiles(upload, app);
+  upload.consistency = validation;
+  upload.inspecting = validation.inspecting;
+  upload.allowMismatch = computeAllowMismatch(upload);
+  if (validation.fatal.length) {
+    upload.error = validation.fatal.map((item) => item.message).join(" ");
+    rerenderModal();
+    return;
+  }
+
   if (!validateVersionName(versionName)) {
     upload.error =
       "versionName không hợp lệ. Dùng chữ, số, dấu chấm, gạch; bắt đầu bằng chữ hoặc số.";
@@ -365,6 +390,7 @@ async function startUpload() {
   }
   upload.allowReplace = upload.allowReplace || hasArtifacts;
 
+  const allowMismatch = upload.allowMismatch;
   upload.running = true;
   upload.done = false;
   upload.progress = 0;
@@ -372,6 +398,7 @@ async function startUpload() {
   upload.files.forEach((file) => {
     file.progress = 0;
     file.sha256 = null;
+    file.uploadError = "";
   });
   rerenderModal();
 
@@ -395,24 +422,30 @@ async function startUpload() {
     }
 
     for (const file of upload.files) {
-      const result = await state.api.uploadArtifact(
-        app.id,
-        versionName,
-        file.abi,
-        file.file,
-        {
-          onProgress: (value) => {
-            file.progress = value;
-            updateUploadProgressDOM(state);
+      try {
+        const result = await state.api.uploadArtifact(
+          app.id,
+          versionName,
+          file.abi,
+          file.file,
+          {
+            allowMismatch,
+            onProgress: (value) => {
+              file.progress = value;
+              updateUploadProgressDOM(state);
+            },
           },
-        },
-      );
-      file.progress = 1;
-      const artifact = result?.version?.artifacts?.find(
-        (candidate) => candidate.abi === file.abi,
-      );
-      if (artifact?.sha256) file.sha256 = artifact.sha256;
-      updateUploadProgressDOM(state);
+        );
+        file.progress = 1;
+        const artifact = result?.version?.artifacts?.find(
+          (candidate) => candidate.abi === file.abi,
+        );
+        if (artifact?.sha256) file.sha256 = artifact.sha256;
+        updateUploadProgressDOM(state);
+      } catch (error) {
+        file.uploadError = uploadErrorMessage(error);
+        throw error;
+      }
     }
 
     upload.running = false;
@@ -422,10 +455,20 @@ async function startUpload() {
     toast(`Đã phát hành ${app.name} v${versionName}.`);
   } catch (error) {
     upload.running = false;
-    upload.error = errorMessage(error);
+    upload.error = uploadErrorMessage(error);
     rerenderModal();
     handleAuthError(error);
   }
+}
+
+function uploadErrorMessage(error) {
+  if (error instanceof ApiError && error.status === 422) {
+    return `Máy chủ từ chối APK (422): ${error.message}`;
+  }
+  if (error instanceof ApiError && error.status === 400) {
+    return `Máy chủ từ chối APK (400): ${error.message}`;
+  }
+  return errorMessage(error);
 }
 
 /* ------------------------------------------------------------------- icon */
@@ -693,12 +736,12 @@ export function handleClick(event) {
     return;
   }
   if (act === "upload") {
-    const appId = element.dataset.app || state.catalog[0]?.id;
-    if (!appId) {
+    const appId = element.dataset.app || null;
+    if (openUpload(state, appId, element.dataset.version || null)) {
+      rerenderModal();
+    } else {
       toast("Tạo ứng dụng trước, rồi đẩy APK lên.", "error");
-      return;
     }
-    if (openUpload(state, appId, element.dataset.version || null)) rerenderModal();
     return;
   }
   if (act === "newApp") {
@@ -862,11 +905,25 @@ export function handleInput(event) {
   }
   const upload = state.modal?.upload;
   if (!upload) return;
-  if (target.id === "upVersion") upload.versionName = target.value;
-  else if (target.id === "upCode") upload.versionCode = target.value;
-  else if (target.id === "upMinSdk") upload.minSdk = target.value;
-  else if (target.id === "upDate") upload.date = target.value;
-  else if (target.id === "upNotes") upload.notes = target.value;
+  if (target.id === "upVersion") {
+    upload.versionName = target.value;
+    upload.touched.versionName = true;
+  } else if (target.id === "upCode") {
+    upload.versionCode = target.value;
+    upload.touched.versionCode = true;
+  } else if (target.id === "upMinSdk") {
+    upload.minSdk = target.value;
+    upload.touched.minSdk = true;
+  } else if (target.id === "upDate") {
+    upload.date = target.value;
+    return;
+  } else if (target.id === "upNotes") {
+    upload.notes = target.value;
+    return;
+  } else {
+    return;
+  }
+  updateUploadAlertsDOM(state);
 }
 
 export function handleChange(event) {
@@ -882,7 +939,10 @@ export function handleChange(event) {
     return;
   }
   if (target.id === "fileInput") {
-    addFiles(target.files);
+    // Snapshot before clearing: resetting the input can empty the live FileList.
+    const files = Array.from(target.files || []);
+    target.value = "";
+    void addFiles(files);
     return;
   }
   if (target.id === "iconInput") {
@@ -893,20 +953,23 @@ export function handleChange(event) {
   if (!upload) return;
   if (target.id === "upApp") {
     upload.appId = target.value;
+    upload.appTouched = true;
+    upload.packageHint = "";
+    refreshUploadValidation(upload, findApp(state.catalog, upload.appId));
+    rerenderModal();
     return;
   }
   if (target.dataset.act === "fileAbi") {
     const file = upload.files.find((candidate) => candidate.id === target.dataset.file);
     if (!file) return;
-    const duplicate = upload.files.find(
-      (candidate) => candidate.id !== file.id && candidate.abi === target.value,
-    );
-    if (duplicate) {
-      upload.files = upload.files.filter((candidate) => candidate.id !== duplicate.id);
-      toast("Đã thay tệp trùng ABI.");
-    }
     file.abi = target.value;
+    // Do not silently drop another file: the validation block explains the
+    // duplicate ABI so the user can decide which APK to keep.
+    file.abiOverridden = file.metadata
+      ? file.abi !== file.metadata.artifactAbi
+      : true;
     upload.error = "";
+    refreshUploadValidation(upload, findApp(state.catalog, upload.appId));
     rerenderModal();
   }
 }
@@ -988,7 +1051,7 @@ export function handleDrop(event) {
     return;
   }
   const upload = state.modal?.upload;
-  if (upload && !upload.running && !upload.done) addFiles(event.dataTransfer.files);
+  if (upload && !upload.running && !upload.done) void addFiles(event.dataTransfer.files);
 }
 
 export function handleStorage(event) {

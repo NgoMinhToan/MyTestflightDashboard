@@ -10,9 +10,10 @@ Desk**). Ứng dụng là HTML/CSS/JavaScript thuần, đóng gói bằng Vite, 
   mở chi tiết, đổi icon bằng cách bấm icon.
 - **Chi tiết**: số liệu phiên bản, kệ kiến trúc (làn ABI theo dung lượng), ma trận phiên bản × ABI,
   lịch sử phiên bản, tìm/lọc phiên bản, tải APK theo từng ABI, sửa metadata phiên bản, xoá.
-- **Tải APK**: thả nhiều tệp, tự nhận ABI từ tên tệp, sửa ABI bằng chip, tiến trình từng tệp và
-  thanh tổng, SHA-256 do máy chủ trả về. Luồng ghi đúng API: `POST /versions` tạo bản nháp rồi
-  `PUT /artifacts/:abi` cho từng tệp.
+- **Tải APK**: thả nhiều tệp, đọc `AndroidManifest.xml` ngay trong trình duyệt (package, versionName,
+  versionCode, minSdk, ABI), tự điền form, tự chọn ứng dụng theo package, cảnh báo lệch/trùng ABI
+  trước khi gửi. Tiến trình từng tệp và thanh tổng, SHA-256 do máy chủ trả về. Luồng ghi vẫn là
+  `POST /versions` rồi `PUT /artifacts/:abi` cho từng tệp.
 - **Icon**: thả PNG/JPG/WebP ≤ 2 MB, xem trước trên nền pastel và nền tối, lưu hoặc xoá.
 - **Metadata**: tạo/sửa ứng dụng, sửa `versionCode`, `minSdk`, ghi chú và ngày phát hành.
 - **Curl cho CI**: sinh lệnh từ Base URL hiện tại, token để dạng biến môi trường.
@@ -22,6 +23,42 @@ Desk**). Ứng dụng là HTML/CSS/JavaScript thuần, đóng gói bằng Vite, 
 
 Ba mục **Phiên bản / Hoạt động / Máy chủ** trên rail được giữ nguyên theo phạm vi thiết kế đã
 chốt; chúng chỉ hiện thông báo "chưa khả dụng", không điều hướng.
+
+## Xem trước APK trước khi tải lên
+
+Khi thả APK, dashboard đọc tệp **tại chỗ trong trình duyệt** trước khi gửi bất cứ thứ gì:
+
+1. Tìm EOCD trong 65 557 byte cuối, đọc central directory và lấy `AndroidManifest.xml` (method 0
+   `stored` hoặc method 8 qua `DecompressionStream("deflate-raw")`).
+2. Parse binary AXML để lấy `packageName`, `versionName`, `versionCode`, `minSdk`, `targetSdk`,
+   `debuggable`, `testOnly`, `split`/`configForSplit`.
+3. Đọc `lib/<abi>/` trong central directory: đúng một ABI → ABI đó; 0 hoặc nhiều hơn → `universal`.
+   ABI từ metadata **thắng** đoán theo tên tệp.
+
+Hộp thoại hiện package, version, minSdk và ABI của từng tệp. Sau khi đọc xong:
+
+- **Tự điền** `versionName`, `versionCode`, `minSdk` từ APK khi hộp thoại **không** mở cho một phiên
+  bản cụ thể và field đó chưa bị người dùng sửa. Field đã sửa tay không bao giờ bị ghi đè.
+- Nếu hộp thoại không mở cho một ứng dụng cụ thể, ứng dụng có `packageName` khớp sẽ được chọn tự
+  động; không có ứng dụng khớp thì hiện gợi ý tạo ứng dụng mới.
+- **Chặn tải lên**: APK lỗi/không phải APK, ZIP64, config split, các tệp lệch package hoặc version,
+  và trùng ABI. Nút tải lên bị vô hiệu hoá trong khi đang đọc và khi còn lỗi fatal.
+- **Cảnh báo**: APK `debuggable`/`testOnly`, ABI bị sửa tay, package APK khác package ứng dụng.
+- Khi người dùng sửa `versionName`/`versionCode`/`minSdk` lệch với APK (hoặc đổi ABI), dashboard gửi
+  `allow_mismatch=version`, `sdk`, `abi` tương ứng. Package lệch **không** tự cho qua: lỗi `422
+  apk_metadata_mismatch` của máy chủ hiện rõ trong `#upError` kèm chi tiết từng trường.
+
+Giới hạn bộ đọc: central directory ≤ 64 MiB, ≤ 200 000 entry, manifest nén ≤ 16 MiB và sau giải nén
+≤ 8 MiB; ZIP64 bị từ chối với lỗi có mã riêng.
+
+| Trình duyệt | Xem trước APK nén | Ghi chú |
+|---|---|---|
+| Chromium / Edge 103+ | Có | `DecompressionStream("deflate-raw")` |
+| Firefox 113+ | Có | |
+| Safari 16.4+ | Có | |
+| Trình duyệt cũ hơn | Không | Vẫn tải lên được: báo "không xem trước được", ABI lấy từ tên tệp, máy chủ xác minh lại |
+
+APK lưu `stored` (method 0) luôn xem trước được vì không cần API giải nén.
 
 ## Chạy local
 
@@ -80,7 +117,7 @@ Màn **Cài đặt** (bấm bánh răng ở đáy rail, hoặc bị chuyển hư
 | POST/PUT/DELETE | `/api/v1/apps[/:id]` | Tạo/sửa/xoá ứng dụng |
 | PUT/DELETE | `/api/v1/apps/:id/icon` | Cập nhật/xoá icon |
 | POST/PUT/DELETE | `/api/v1/apps/:id/versions[/:name]` | Tạo/sửa/xoá phiên bản |
-| PUT/DELETE | `/api/v1/apps/:id/versions/:name/artifacts/:abi` | Tải/xoá APK |
+| PUT/DELETE | `/api/v1/apps/:id/versions/:name/artifacts/:abi` | Tải/xoá APK; upload nhận thêm `?allow_mismatch=package,version,sdk,abi` |
 | GET | `/api/v1/apps/:id/versions/:name/download?abi=` | Tải APK (link trực tiếp) |
 
 Mọi thao tác ghi gửi header `X-Management-Key`. Các route đọc vẫn công khai như máy chủ quy định.
@@ -111,13 +148,27 @@ không cần rewrite trên Pages.
 ## Build và kiểm tra
 
 ```bash
+npm test          # node --test: bộ đọc ZIP/AXML + quy tắc prefill/validate
 npm run build     # xuất dist/
 npm run preview   # chạy thử bản build
 ```
 
+`npm test` dùng Node 22 và không cần trình duyệt. Bộ test gồm:
+
+- `test/fixtures.mjs` — ZIP writer (stored, deflate, data descriptor) và binary-AXML builder
+  (UTF-8/UTF-16), kèm manifest AXML thật 8 000 byte của workspace (base64, không commit APK).
+- `test/apk-inspect.test.mjs` — fixture thật, stored/deflate, UTF-8/UTF-16, 0/1/nhiều ABI,
+  `versionName` dạng resource reference, config split, ZIP64, vượt giới hạn, APK hỏng, thiếu
+  manifest, và trường hợp trình duyệt thiếu `DecompressionStream`.
+- `test/upload-plan.test.mjs` — prefill không ghi đè field đã sửa/phiên bản cụ thể, lệch
+  package/version giữa nhiều tệp, trùng ABI, ABI override, cảnh báo debuggable/testOnly, tự chọn
+  ứng dụng theo package và `allow_mismatch`.
+
 Đã kiểm tra bằng Chrome headless với server thật: chuyển hướng khi thiếu token, kiểm tra kết nối,
 lưu cài đặt, tải danh mục, tạo/xoá ứng dụng, upload icon, upload APK có tiến trình và SHA-256, sửa
-metadata phiên bản, chuyển sáng/tối, layout 375px không tràn ngang, và bản build production.
+metadata phiên bản, chuyển sáng/tối, layout 375px không tràn ngang, và bản build production. Phần
+đọc AXML/prefill/validate được kiểm tra tự động bằng `npm test`; nên thả thử một APK thật trong
+trình duyệt đích trước khi phát hành.
 
 ## Cấu trúc
 
@@ -132,6 +183,8 @@ MyTestflightDashboard/
 │   ├── actions.js                # thao tác UI → API
 │   ├── render.js                 # render trang/modal/toast, tải danh mục, health
 │   ├── api.js                    # ApiClient, lỗi, upload XHR, probe token
+│   ├── apk-inspect.js            # ZIP + binary AXML parser (browser + Node)
+│   ├── upload-plan.js            # prefill, validate, allow_mismatch, chọn app
 │   ├── settings.js               # localStorage, chuẩn hoá Base URL, theme
 │   ├── model.js                  # chuẩn hoá dữ liệu API → mô hình thiết kế
 │   ├── format.js                 # ABI, dung lượng, ngày, icon, màu pastel
@@ -142,6 +195,7 @@ MyTestflightDashboard/
 │   ├── styles.css                # CSS từ bản thiết kế đã chốt
 │   ├── theme.css                 # dark theme
 │   └── app.css                   # settings, loading/error, theme control
+├── test/                         # node --test: fixtures, parser, upload-plan
 └── README.md
 ```
 
@@ -150,6 +204,9 @@ MyTestflightDashboard/
 - Token quản trị cho phép thay đổi ứng dụng/phiên bản/APK. Không dùng dashboard trên máy chia sẻ.
 - Token chỉ nằm trong `localStorage` của origin dashboard và chỉ được gửi tới Base URL bạn nhập.
   Không có analytics, không gọi dịch vụ thứ ba.
+- Xem trước APK chạy hoàn toàn trong trình duyệt: chỉ các byte của ZIP/AXML cần thiết được đọc bằng
+  `Blob.slice()`, không có yêu cầu mạng nào trước khi bấm tải lên. Dù vậy, máy chủ **luôn** đọc và
+  xác minh lại APK; `allow_mismatch` chỉ bỏ qua đúng trường người dùng đã sửa tay.
 - Nên dùng HTTPS cho máy chủ. Trang GitHub Pages chạy HTTPS nên trình duyệt sẽ chặn máy chủ HTTP
   không phải `localhost` (mixed content). Chrome có thể cần
   `Access-Control-Allow-Private-Network` khi gọi IP nội bộ; máy chủ đã trả header này khi được hỏi.
