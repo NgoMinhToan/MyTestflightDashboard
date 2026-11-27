@@ -147,7 +147,30 @@ test("effectiveVersionName falls back to versionCode only when empty", () => {
   assert.equal(effectiveVersionName(null), null);
 });
 
-test("isPlaceholderApp treats a missing or id package as placeholder", () => {
+test("isPlaceholderApp honors the explicit packageBound flag", () => {
+  assert.equal(
+    isPlaceholderApp({
+      id: "com.example.raster",
+      packageName: "com.example.raster",
+      packageBound: true,
+    }),
+    false,
+  );
+  assert.equal(
+    isPlaceholderApp({
+      id: "crm",
+      packageName: "com.example.crm",
+      packageBound: false,
+    }),
+    true,
+  );
+  assert.equal(
+    isPlaceholderApp({ id: "x", packageName: "", packageBound: true }),
+    false,
+  );
+});
+
+test("isPlaceholderApp keeps the legacy fallback for older servers", () => {
   assert.equal(isPlaceholderApp({ id: "crm", packageName: "" }), true);
   assert.equal(isPlaceholderApp({ id: "crm", packageName: "crm" }), true);
   assert.equal(isPlaceholderApp({ id: "crm", packageName: "com.acme.crm" }), false);
@@ -212,8 +235,46 @@ test("resolveUploadTarget blocks a detail-page package mismatch", () => {
   assert.match(target.fatal[0].message, /com\.example\.app/);
 });
 
+test("a bound app with id === package is not a placeholder", () => {
+  const catalog = [
+    {
+      id: "com.example.raster",
+      name: "Raster",
+      packageName: "com.example.raster",
+      packageBound: true,
+    },
+  ];
+  const upload = makeUpload({
+    expectedAppId: "com.example.raster",
+    files: [readyFile("a")],
+  });
+  const target = resolveUploadTarget(upload, catalog, "com.example.raster");
+  assert.equal(target.status, "blocked");
+  assert.deepEqual(codes(target.fatal), ["detail_package_mismatch"]);
+  assert.match(target.fatal[0].message, /com\.example\.app/);
+
+  const validation = validateUploadFiles(upload, catalog, "com.example.raster");
+  assert.ok(codes(validation.fatal).includes("detail_package_mismatch"));
+});
+
 test("resolveUploadTarget lets a placeholder app bind a real package", () => {
   const catalog = [{ id: "crm", name: "CRM", packageName: "crm" }];
+  const upload = makeUpload({ expectedAppId: "crm", files: [readyFile("a")] });
+  const target = resolveUploadTarget(upload, catalog, "crm");
+  assert.equal(target.status, "existing");
+  assert.equal(target.appId, "crm");
+  assert.deepEqual(codes(target.warnings), ["package_bind"]);
+});
+
+test("packageBound:false still allows a detail placeholder to bind", () => {
+  const catalog = [
+    {
+      id: "crm",
+      name: "CRM",
+      packageName: "com.acme.crm",
+      packageBound: false,
+    },
+  ];
   const upload = makeUpload({ expectedAppId: "crm", files: [readyFile("a")] });
   const target = resolveUploadTarget(upload, catalog, "crm");
   assert.equal(target.status, "existing");

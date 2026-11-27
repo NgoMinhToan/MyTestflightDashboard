@@ -10,9 +10,15 @@
  * browser.
  */
 
-/** Placeholder apps use their id as the package (legacy/manual apps). */
+/**
+ * Placeholder apps have no real package yet. New servers persist the binding
+ * explicitly as `packageBound`; older servers omit it, so keep the legacy
+ * `packageName === id` heuristic for them.
+ */
 export function isPlaceholderApp(app) {
   if (!app) return true;
+  if (app.packageBound === true) return false;
+  if (app.packageBound === false) return true;
   const packageName = String(app.packageName || "");
   return packageName === "" || packageName === app.id;
 }
