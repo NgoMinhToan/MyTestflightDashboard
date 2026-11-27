@@ -196,6 +196,11 @@ export function suggestVersion(app) {
   return `${parts.join(".")}${suffix}`;
 }
 
+/**
+ * A temporary guess used only until the browser reads the APK, or when
+ * `DecompressionStream` is unavailable. Metadata from `apk-inspect.js` always
+ * wins; the server verifies the declared ABI either way.
+ */
 export function inferAbi(filename) {
   const name = String(filename || "").toLowerCase();
   if (name.includes("universal")) return "universal";

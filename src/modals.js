@@ -13,6 +13,14 @@ import {
   todayDateInput,
 } from "./format.js";
 import { svg } from "./icons.js";
+import { inspectApk } from "./apk-inspect.js";
+import {
+  applyInspection,
+  applyInspectionError,
+  applyPrefill,
+  refreshUploadValidation,
+  selectAppForPackage,
+} from "./upload-plan.js";
 
 const ABI_OPTIONS = ABI_ORDER.map(
   (abi) => `<option value="${abi}">${ABI_META[abi].label}</option>`,
@@ -37,73 +45,206 @@ function closeButton() {
 
 /* ------------------------------------------------------------------ upload */
 
-export function openUpload(state, appId, versionName = null) {
-  const app =
-    state.catalog.find((candidate) => candidate.id === appId) || state.catalog[0] || null;
-  if (!app) return false;
-  const versions = sortedVersions(app.versions);
+function appForUpload(state, upload) {
+  return (
+    state.catalog.find((candidate) => candidate.id === upload?.appId) ||
+    state.catalog[0] ||
+    null
+  );
+}
+
+function emptyConsistency() {
+  return { fatal: [], warnings: [], inspecting: false, detected: null };
+}
+
+export function openUpload(state, appId = null, versionName = null) {
+  const explicitApp = appId != null;
+  const app = explicitApp
+    ? state.catalog.find((candidate) => candidate.id === appId) || null
+    : null;
+  if (explicitApp && !app) return false;
+  const fallbackApp = app || state.catalog[0] || null;
+  if (!fallbackApp) return false;
+  const versions = sortedVersions(fallbackApp.versions);
   const known = versionName ? versions.find((version) => version.name === versionName) : null;
   const draft = versionName ? null : versions.find((version) => version.artifacts.length === 0);
   const top = versions[0];
   const source = known || draft || null;
-  state.modal = {
-    type: "upload",
-    upload: {
-      appId: app.id,
-      versionName: versionName || draft?.name || suggestVersion(app),
-      versionCode: String(source?.code || (top?.code || 0) + 1 || 1),
-      minSdk: String(source?.minSdk ?? top?.minSdk ?? 26),
-      date: source?.publishedAt ? toDateInput(source.publishedAt) : todayDateInput(),
-      notes: source?.notes || "",
-      files: [],
-      running: false,
-      done: false,
-      error: "",
-      allowReplace: false,
-      progress: 0,
-    },
+  const upload = {
+    appId: fallbackApp.id,
+    explicitApp,
+    appTouched: false,
+    existingVersion: Boolean(versionName),
+    versionName: versionName || draft?.name || suggestVersion(fallbackApp),
+    versionCode: String(source?.code || (top?.code || 0) + 1 || 1),
+    minSdk: String(source?.minSdk ?? top?.minSdk ?? 26),
+    date: source?.publishedAt ? toDateInput(source.publishedAt) : todayDateInput(),
+    notes: source?.notes || "",
+    files: [],
+    touched: { versionName: false, versionCode: false, minSdk: false },
+    inspecting: false,
+    consistency: emptyConsistency(),
+    packageWarning: "",
+    packageHint: "",
+    allowMismatch: [],
+    running: false,
+    done: false,
+    error: "",
+    allowReplace: false,
+    progress: 0,
   };
+  refreshUploadValidation(upload, fallbackApp);
+  state.modal = { type: "upload", upload };
   return true;
 }
 
-export function addFilesToUpload(state, fileList) {
+async function inspectUploadEntry(state, upload, entry, onUpdate) {
+  if (state.modal?.upload !== upload || !upload.files.includes(entry)) return;
+  try {
+    const result = await inspectApk(entry.file);
+    if (state.modal?.upload !== upload) return;
+    if (!upload.files.includes(entry)) return;
+    applyInspection(upload, entry.id, result);
+  } catch (error) {
+    if (state.modal?.upload !== upload) return;
+    if (!upload.files.includes(entry)) return;
+    applyInspectionError(upload, entry.id, error);
+  }
+  if (state.modal?.upload !== upload) return;
+  if (!upload.files.includes(entry)) return;
+  applyPrefill(upload);
+  const selection = selectAppForPackage(upload, state.catalog);
+  if (selection) {
+    upload.packageHint = selection.app
+      ? ""
+      : `Chưa có ứng dụng nào có package ${selection.packageName}. Tạo ứng dụng mới trong Thư viện rồi thử lại.`;
+  }
+  refreshUploadValidation(upload, appForUpload(state, upload));
+  onUpdate?.();
+}
+
+/**
+ * Add APKs and inspect each one in the browser. Entries appear immediately as
+ * "inspecting" so the footer can block upload while the manifest is read; each
+ * result triggers `onUpdate` (the caller re-renders the modal).
+ */
+export async function addFilesToUpload(state, fileList, { onUpdate } = {}) {
   const upload = state.modal?.upload;
-  if (!upload || upload.running || upload.done) return { added: 0, replaced: 0, rejected: 0 };
+  if (!upload || upload.running || upload.done) {
+    return {
+      added: 0,
+      rejected: 0,
+      inspecting: 0,
+      failed: 0,
+      fatal: 0,
+      warnings: 0,
+    };
+  }
   let added = 0;
-  let replaced = 0;
   let rejected = 0;
+  const pending = [];
   Array.from(fileList || []).forEach((file) => {
     if (!/\.apk$/i.test(file.name)) {
       rejected += 1;
       return;
     }
-    const abi = inferAbi(file.name);
+    const duplicate = upload.files.some(
+      (existing) =>
+        existing.status !== "error" &&
+        existing.name === file.name &&
+        existing.sizeBytes === file.size,
+    );
+    if (duplicate) {
+      rejected += 1;
+      return;
+    }
     const entry = {
       id: fileId(),
       file,
       name: file.name,
       sizeBytes: file.size,
-      abi,
+      abi: inferAbi(file.name),
+      detectedAbi: null,
+      abiOverridden: false,
+      status: "inspecting",
+      metadata: null,
+      error: "",
+      errorCode: "",
+      previewUnavailable: false,
+      previewMessage: "",
       progress: 0,
       sha256: null,
     };
-    const existing = upload.files.findIndex((candidate) => candidate.abi === abi);
-    if (existing >= 0) {
-      upload.files[existing] = entry;
-      replaced += 1;
-    } else {
-      upload.files.push(entry);
-      added += 1;
-    }
+    upload.files.push(entry);
+    pending.push(entry);
+    added += 1;
   });
   upload.error = "";
-  return { added, replaced, rejected };
+  refreshUploadValidation(upload, appForUpload(state, upload));
+  onUpdate?.();
+
+  if (pending.length) {
+    await Promise.all(
+      pending.map((entry) => inspectUploadEntry(state, upload, entry, onUpdate)),
+    );
+    if (state.modal?.upload === upload) {
+      applyPrefill(upload);
+      refreshUploadValidation(upload, appForUpload(state, upload));
+      onUpdate?.();
+    }
+  }
+  const consistency = upload.consistency || emptyConsistency();
+  return {
+    added,
+    rejected,
+    inspecting: upload.files.filter((file) => file.status === "inspecting").length,
+    failed: upload.files.filter((file) => file.status === "error").length,
+    fatal: consistency.fatal.length,
+    warnings: consistency.warnings.length,
+  };
 }
 
 export function removeUploadFile(state, id) {
   const upload = state.modal?.upload;
   if (!upload || upload.running || upload.done) return;
   upload.files = upload.files.filter((file) => file.id !== id);
+  if (!upload.files.some((file) => file.metadata)) upload.packageHint = "";
+  refreshUploadValidation(upload, appForUpload(state, upload));
+}
+
+function filePreviewHTML(file) {
+  if (file.status === "inspecting") {
+    return `<div class="apkprev inspecting"><span class="spinner"></span> Đang đọc AndroidManifest.xml…</div>`;
+  }
+  if (file.status === "error") {
+    return `<div class="apkprev bad">${esc(file.error || "Không đọc được APK.")}</div>`;
+  }
+  if (file.previewUnavailable) {
+    return `<div class="apkprev muted">${esc(file.previewMessage || "Không xem trước được APK trong trình duyệt này.")} ABI đang lấy từ tên tệp; máy chủ sẽ xác minh.</div>`;
+  }
+  const metadata = file.metadata;
+  if (!metadata) return "";
+  const meta = ABI_META[metadata.artifactAbi] || {
+    label: metadata.artifactAbi,
+    cls: "more",
+  };
+  const flags = [
+    metadata.debuggable ? `<span class="flag bad">debuggable</span>` : "",
+    metadata.testOnly ? `<span class="flag bad">testOnly</span>` : "",
+    metadata.configSplit ? `<span class="flag bad">config split</span>` : "",
+  ].join("");
+  const abiDetail = metadata.abis.length > 1 ? ` · ${metadata.abis.join(", ")}` : "";
+  const targetLabel =
+    metadata.targetSdk != null ? ` · targetSdk ${metadata.targetSdk}` : "";
+  const uploadError = file.uploadError
+    ? `<div class="apkprev bad">${esc(file.uploadError)}</div>`
+    : "";
+  return `
+    <div class="apkprev">
+      <div class="pkline"><span class="pkg">${esc(metadata.packageName)}</span>${flags}</div>
+      <div class="kvline">v${esc(metadata.versionName ?? "—")} · code ${metadata.versionCode} · minSdk ${metadata.minSdk ?? "—"}${targetLabel}</div>
+      <div class="abiline"><span class="abi ${meta.cls}">${esc(meta.label)}</span><span class="det">ABI từ APK${esc(abiDetail)}</span></div>
+    </div>${uploadError}`;
 }
 
 function uploadFileRows(upload) {
@@ -116,20 +257,35 @@ function uploadFileRows(upload) {
         (abi) =>
           `<option value="${abi}" ${abi === file.abi ? "selected" : ""}>${ABI_META[abi].label}</option>`,
       ).join("");
+      const overridden = Boolean(
+        file.metadata && file.abi !== file.metadata.artifactAbi,
+      );
+      const statusPill =
+        file.status === "inspecting"
+          ? `<span class="fstat">đang đọc…</span>`
+          : file.status === "error"
+            ? `<span class="fstat bad">lỗi</span>`
+            : file.previewUnavailable
+              ? `<span class="fstat muted">không xem trước</span>`
+              : "";
+      const locked = upload.running || upload.done || file.status === "inspecting";
       return `
-      <div class="file ${percent >= 100 ? "done" : ""}" data-file="${esc(file.id)}">
+      <div class="file ${percent >= 100 ? "done" : ""} ${esc(file.status)}" data-file="${esc(file.id)}">
         <div class="f1">
           <span class="abi ${meta.cls}">${esc(meta.label)}</span>
           <span class="nm">${esc(file.name)}</span>
           <span class="sz">${fmtSize(file.sizeBytes)}</span>
+          ${statusPill}
           ${
             upload.running || upload.done
               ? ""
               : `<button class="rm" data-act="rmFile" data-file="${esc(file.id)}" title="Bỏ tệp">${svg("close", 10)}</button>`
           }
         </div>
+        ${filePreviewHTML(file)}
         <div class="fab">
-          <select data-act="fileAbi" data-file="${esc(file.id)}" ${upload.running || upload.done ? "disabled" : ""}>${options}</select>
+          <select data-act="fileAbi" data-file="${esc(file.id)}" class="${overridden ? "override" : ""}" title="ABI đọc từ APK được ưu tiên; đổi tay sẽ gửi allow_mismatch=abi." ${locked ? "disabled" : ""}>${options}</select>
+          ${overridden ? `<span class="ovr">đã sửa</span>` : ""}
           <span class="pr">${percent}%</span>
           ${file.sha256 ? `<span class="hashok">${svg("check", 11)} sha ${esc(shortSha(file.sha256))}</span>` : ""}
         </div>
@@ -139,10 +295,65 @@ function uploadFileRows(upload) {
     .join("");
 }
 
+export function uploadBlocked(upload) {
+  if (!upload) return true;
+  if (upload.running) return true;
+  if (upload.inspecting || upload.consistency?.inspecting) return true;
+  return (upload.consistency?.fatal?.length || 0) > 0;
+}
+
+function alertItems(items) {
+  return items.map((item) => `<li>${esc(item.message)}</li>`).join("");
+}
+
+function uploadAlertsHTML(upload) {
+  const fatal = upload.consistency?.fatal || [];
+  const warnings = upload.consistency?.warnings || [];
+  const hint = upload.packageHint
+    ? `<div class="upload-alert info">${esc(upload.packageHint)}</div>`
+    : "";
+  const mismatch = upload.allowMismatch?.length
+    ? `<div class="upload-alert info">Sẽ gửi <span class="mono">allow_mismatch=${esc(upload.allowMismatch.join(","))}</span> cho máy chủ.</div>`
+    : "";
+  const fatalHtml = fatal.length
+    ? `<div class="upload-alert fatal"><b>Chưa thể tải lên</b><ul>${alertItems(fatal)}</ul></div>`
+    : "";
+  const warningHtml = warnings.length
+    ? `<div class="upload-alert warn"><b>Cảnh báo</b><ul>${alertItems(warnings)}</ul></div>`
+    : "";
+  return hint + fatalHtml + warningHtml + mismatch;
+}
+
+/** Patch the alert block and button after a form field changes (no re-render). */
+export function updateUploadAlertsDOM(state) {
+  const upload = state.modal?.upload;
+  if (!upload) return;
+  refreshUploadValidation(upload, appForUpload(state, upload));
+  const alerts = document.getElementById("upAlerts");
+  if (alerts) alerts.innerHTML = uploadAlertsHTML(upload);
+  const appHint = document.getElementById("upAppHint");
+  if (appHint) appHint.textContent = upload.packageWarning || "";
+  const button = document.getElementById("uploadBtn");
+  if (button) button.disabled = uploadBlocked(upload);
+  const hint = document.getElementById("upFootHint");
+  if (hint) hint.textContent = uploadFootHint(upload);
+}
+
+function uploadFootHint(upload) {
+  if (upload.done) return "Đã cập nhật danh mục và manifest.";
+  if (upload.running) return "Không đóng cửa sổ khi đang tải.";
+  if (upload.inspecting || upload.consistency?.inspecting) {
+    return "Đang đọc metadata APK trong trình duyệt…";
+  }
+  if (upload.consistency?.fatal?.length) {
+    return "Sửa lỗi APK bên trái trước khi tải lên.";
+  }
+  return "APK được đọc tại chỗ trước khi gửi; máy chủ vẫn xác minh lại.";
+}
+
 function uploadModal(state) {
   const upload = state.modal.upload;
-  const app =
-    state.catalog.find((candidate) => candidate.id === upload.appId) || state.catalog[0];
+  const app = appForUpload(state, upload);
   if (!app) return overlay(`<div class="dbody">Không còn ứng dụng để tải lên.</div>`, 620);
   const disabled = upload.running || upload.done ? "disabled" : "";
   const appOptions = state.catalog
@@ -151,12 +362,26 @@ function uploadModal(state) {
         `<option value="${esc(candidate.id)}" ${candidate.id === upload.appId ? "selected" : ""}>${esc(candidate.name)}, ${esc(candidate.id)}</option>`,
     )
     .join("");
+  const blocked = uploadBlocked(upload);
+  const overallText = upload.done
+    ? "Hoàn tất"
+    : upload.running
+      ? "Đang tải lên…"
+      : upload.inspecting || upload.consistency?.inspecting
+        ? "Đang đọc APK…"
+        : "Sẵn sàng";
+  const percent = Math.round((upload.progress || 0) * 100);
+  const uploadLabel = upload.running
+    ? `<span class="spinner"></span> Đang tải lên…`
+    : upload.inspecting || upload.consistency?.inspecting
+      ? `<span class="spinner"></span> Đang đọc APK…`
+      : `Tải lên${upload.files.length ? ` ${upload.files.length} tệp` : ""}`;
 
   return overlay(
     `
     <div class="dhead">
       <div><div class="kick">Phát hành</div><h2>Tải bản dựng lên</h2>
-        <p>Kéo APK vào vùng thả, kiểm tra kiến trúc, rồi đẩy lên máy chủ.</p></div>
+        <p>APK được đọc ngay trong trình duyệt để lấy package, version và ABI trước khi gửi.</p></div>
       ${closeButton()}
     </div>
     <div class="dbody">
@@ -165,14 +390,15 @@ function uploadModal(state) {
           <div class="drop ${upload.files.length ? "has" : ""}" id="dropzone" data-act="pickFiles" style="${upload.files.length ? "min-height:150px" : ""}">
             <div class="up">${svg("upload", 24)}</div>
             <h3>${upload.files.length ? "Thả thêm APK" : "Thả APK vào đây"}</h3>
-            <p>Kéo một hoặc nhiều tệp .apk. Tên tệp chứa ABI sẽ được nhận tự động, bạn vẫn sửa được.</p>
+            <p>Kéo một hoặc nhiều tệp .apk. Dashboard đọc AndroidManifest.xml tại chỗ, không tải tệp lên trước.</p>
             <button class="btn btn-ghost pick" data-act="pickFiles">Chọn tệp</button>
             <div class="tiny">Mỗi ABI chỉ giữ một tệp. Giới hạn dung lượng do máy chủ quy định.</div>
           </div>
           <div class="files" id="fileList">${uploadFileRows(upload)}</div>
+          <div id="upAlerts">${uploadAlertsHTML(upload)}</div>
           ${
             upload.files.length
-              ? `<div class="overall" id="overall"><span id="ovText">${upload.done ? "Hoàn tất" : upload.running ? "Đang tải lên…" : "Sẵn sàng"}</span><div class="pb"><i id="ovBar" style="width:${Math.round((upload.progress || 0) * 100)}%"></i></div><span id="ovPct">${Math.round((upload.progress || 0) * 100)}%</span></div>`
+              ? `<div class="overall" id="overall"><span id="ovText">${overallText}</span><div class="pb"><i id="ovBar" style="width:${percent}%"></i></div><span id="ovPct">${percent}%</span></div>`
               : ""
           }
           <div class="upload-error" id="upError">${esc(upload.error || "")}</div>
@@ -182,6 +408,7 @@ function uploadModal(state) {
         <div class="form">
           <div class="field"><label for="upApp">Ứng dụng</label>
             <select id="upApp" ${disabled}>${appOptions}</select>
+            <div class="hint" id="upAppHint" style="color:var(--danger)">${esc(upload.packageWarning)}</div>
           </div>
           <div class="f2">
             <div class="field"><label for="upVersion">Tên phiên bản</label>
@@ -210,23 +437,13 @@ function uploadModal(state) {
       </div>
     </div>
     <div class="dfoot">
-      <span class="hint">${
-        upload.done
-          ? "Đã cập nhật danh mục và manifest."
-          : upload.running
-            ? "Không đóng cửa sổ khi đang tải."
-            : "APK được băm SHA-256 khi lên máy chủ."
-      }</span>
+      <span class="hint" id="upFootHint">${esc(uploadFootHint(upload))}</span>
       <span class="sp"></span>
       <button class="btn btn-ghost" data-act="closeModal" ${upload.running ? "disabled" : ""}>${upload.done ? "Đóng" : "Huỷ"}</button>
       ${
         upload.done
           ? `<button class="btn btn-dark" data-act="goUploadVersion">Xem phiên bản</button>`
-          : `<button class="btn btn-primary" data-act="startUpload" ${upload.running ? "disabled" : ""}>${
-              upload.running
-                ? `<span class="spinner"></span> Đang tải lên…`
-                : `Tải lên${upload.files.length ? ` ${upload.files.length} tệp` : ""}`
-            }</button>`
+          : `<button class="btn btn-primary" id="uploadBtn" data-act="startUpload" ${blocked ? "disabled" : ""}>${uploadLabel}</button>`
       }
     </div>`,
     920,

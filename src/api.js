@@ -33,9 +33,33 @@ function friendlyMessage(code, fallback) {
       return "Không tìm thấy APK cho kiến trúc này.";
     case "icon_not_found":
       return "Ứng dụng chưa có icon.";
+    case "invalid_apk":
+      return fallback
+        ? `APK không hợp lệ: ${fallback}`
+        : "Máy chủ không đọc được APK (không phải APK hợp lệ, thiếu AndroidManifest.xml, ZIP64 hoặc config split).";
+    case "apk_metadata_mismatch":
+      return fallback
+        ? `APK không khớp metadata: ${fallback}`
+        : "APK không khớp package/version/minSdk/ABI mà máy chủ mong đợi.";
+    case "invalid_request":
+      return fallback ? `Yêu cầu không hợp lệ: ${fallback}` : "Yêu cầu không hợp lệ.";
     default:
       return fallback;
   }
+}
+
+const MISMATCH_KINDS = ["package", "version", "sdk", "abi"];
+
+/** Normalise `allow_mismatch` to the canonical, deduplicated CSV order. */
+export function allowMismatchQuery(value) {
+  const list = Array.isArray(value) ? value : String(value ?? "").split(",");
+  const selected = new Set(
+    list
+      .map((item) => String(item).trim().toLowerCase())
+      .filter((item) => MISMATCH_KINDS.includes(item)),
+  );
+  if (!selected.size) return "";
+  return MISMATCH_KINDS.filter((kind) => selected.has(kind)).join(",");
 }
 
 function timeoutSignal(ms, external) {
@@ -231,11 +255,19 @@ export class ApiClient {
   /**
    * XHR is used for APK uploads because fetch does not expose upload progress.
    */
-  uploadArtifact(appId, versionName, abi, file, { onProgress, signal } = {}) {
+  uploadArtifact(
+    appId,
+    versionName,
+    abi,
+    file,
+    { onProgress, signal, allowMismatch } = {},
+  ) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+      const mismatch = allowMismatchQuery(allowMismatch);
+      const query = mismatch ? `?allow_mismatch=${encode(mismatch)}` : "";
       const target = this.url(
-        `/api/v1/apps/${encode(appId)}/versions/${encode(versionName)}/artifacts/${encode(abi)}`,
+        `/api/v1/apps/${encode(appId)}/versions/${encode(versionName)}/artifacts/${encode(abi)}${query}`,
       );
       xhr.open("PUT", target, true);
       xhr.setRequestHeader("Content-Type", "application/vnd.android.package-archive");

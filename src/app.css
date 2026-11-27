@@ -302,6 +302,99 @@ html[data-theme="dark"] .skel::after {
 .up-hint { font-size: 12px; line-height: 1.55; color: var(--mute); margin-top: 9px; }
 .up-hint b { color: var(--ink); }
 
+/* APK preview read in the browser before upload */
+.file.inspecting { border-style: dashed; }
+.file.error { border-color: var(--line-danger); background: var(--coral-wash); }
+.file .fstat {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .02em;
+  color: var(--mute);
+  flex: none;
+}
+.file .fstat.bad { color: var(--danger); }
+.file .fstat.muted { font-weight: 600; }
+.file select.override { border-color: var(--coral-deep); background: var(--coral-wash); color: var(--danger); }
+.file .ovr { font-size: 10px; font-weight: 800; color: var(--danger); }
+
+.apkprev {
+  margin-top: 7px;
+  border-top: 1px dashed var(--line);
+  padding-top: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.apkprev.inspecting,
+.apkprev.muted {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  border-top: 0;
+  padding-top: 4px;
+  font-size: 11.5px;
+  color: var(--mute);
+  line-height: 1.45;
+}
+.apkprev.bad {
+  border-top: 0;
+  padding-top: 4px;
+  font-size: 11.5px;
+  color: var(--danger);
+  font-weight: 700;
+  line-height: 1.45;
+}
+.apkprev .pkline { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; min-width: 0; }
+.apkprev .pkg {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.apkprev .kvline { font-family: var(--mono); font-size: 10.5px; color: var(--mute); }
+.apkprev .abiline { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.apkprev .det { font-size: 10.5px; color: var(--mute); }
+.flag {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  border-radius: 5px;
+  padding: 2px 5px;
+}
+.flag.bad { background: var(--coral-wash); color: var(--danger); }
+
+/* Validation result for the whole upload */
+.upload-alert {
+  margin-top: 9px;
+  border-radius: 12px;
+  padding: 9px 11px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.upload-alert b {
+  display: block;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+.upload-alert ul { margin: 0; padding-left: 16px; }
+.upload-alert li + li { margin-top: 2px; }
+.upload-alert.fatal { border: 1px solid var(--line-danger); background: var(--coral-wash); color: var(--danger); }
+.upload-alert.warn {
+  border: 1px solid var(--line-strong);
+  background: var(--soft);
+  color: var(--warn-ink, #7A5000);
+}
+.upload-alert.info { border: 1px solid var(--line); background: var(--soft); color: var(--mute); font-weight: 600; }
+#upAppHint:empty { display: none; }
+
 /* Version edit button and row actions */
 .mini svg, .btn svg, .chip svg { flex: none; }
 .version-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
