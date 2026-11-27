@@ -220,3 +220,7 @@ export function errorMessage(error) {
 }
 
 export const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+// Shared upload helpers live in `upload-plan.js`; re-exported here so views can
+// import one formatting module without depending on the upload state machine.
+export { appIdFromPackage, effectiveVersionName } from "./upload-plan.js";

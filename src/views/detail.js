@@ -70,7 +70,6 @@ export function detailPageHTML(state, app) {
   const abiCount = latest ? latest.artifacts.length : 0;
 
   const allDrafts = state.catalog.reduce((sum, item) => sum + draftCount(item), 0);
-  const noBuild = state.catalog.filter((item) => published(item).length === 0).length;
 
   const catalogBytes = state.catalog.reduce((sum, item) => sum + totalBytes(item), 0);
   const share = catalogBytes > 0 ? Math.round((bytes / catalogBytes) * 100) : 0;
@@ -115,7 +114,6 @@ export function detailPageHTML(state, app) {
         <div class="phead">
           <div class="ptop"><h3>Kiến trúc trong các phiên bản</h3><span class="sub" id="matrixSub">${apks} APK</span></div>
         </div>
-        <p class="archhint">Mỗi làn là một APK, độ rộng theo dung lượng. Làn có vòng sáng là ABI mặc định khi tải không chỉ định.</p>
         <div class="shelves" id="matrix"></div>
       </section>
 
@@ -144,7 +142,6 @@ export function detailPageHTML(state, app) {
           <section class="panel sidecard">
             <div class="k">Độ phủ kiến trúc</div>
             <h4>${builds} bản dựng đã phát hành</h4>
-            <p>Số phiên bản có APK cho từng ABI. Universal phục vụ mọi máy nhưng nặng hơn APK theo kiến trúc.</p>
             <div class="coverage" id="coverage"></div>
           </section>
           <section class="panel sidecard">
@@ -160,7 +157,6 @@ export function detailPageHTML(state, app) {
           <section class="panel sidecard">
             <div class="k">Trạng thái phát hành</div>
             <h4>${allDrafts ? `${allDrafts} bản nháp đang chờ` : "Không có bản nháp"}</h4>
-            <p>${noBuild ? `${noBuild} ứng dụng chưa có APK. ` : ""}Bản nháp chỉ hiện ở quản trị, không xuất hiện trong app Android cho đến khi có APK đầu tiên.</p>
             <div class="kv" style="margin-top:8px"><span>Máy chủ</span><b data-health-card>Đang kiểm tra</b></div>
             <div class="kv"><span>Kiểm tra SHA-256</span><b>Bật khi có</b></div>
           </section>
@@ -249,8 +245,8 @@ export function renderVersionList(state, app) {
         ${
           isDraft
             ? `<div class="draftzone">
-                 <div class="dz"><b>Chưa có APK.</b> Bản nháp chỉ hiện trong quản trị.</div>
-                 <button class="mini navy" data-act="upload" data-app="${esc(app.id)}" data-version="${esc(version.name)}">${svg("upload", 12)} Đẩy APK lên</button>
+                 <div class="dz"><b>Chưa có APK.</b></div>
+                 <button class="mini navy" data-act="upload" data-app="${esc(app.id)}">${svg("upload", 12)} Đẩy APK lên</button>
                </div>
                <div class="vfoot">
                  <span class="lbl">code ${version.code}, minSdk ${version.minSdk ?? "—"}</span>

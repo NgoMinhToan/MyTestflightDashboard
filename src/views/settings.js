@@ -27,7 +27,6 @@ export function settingsPageHTML(state) {
       <div>
         <div class="kick">Cấu hình kết nối</div>
         <h1>Nói chuyện với<br><em>máy chủ của bạn.</em></h1>
-        <p>Nhập địa chỉ máy chủ và management token. Thông tin chỉ được lưu trong trình duyệt này và dùng cho mọi thao tác trong trang chính.</p>
       </div>
       <div class="mstats">
         <div class="mstat"><b id="setStatToken">${tokenSaved ? "Đã lưu" : "Chưa có"}</b><span>token trong trình duyệt</span></div>
@@ -79,7 +78,6 @@ export function settingsPageHTML(state) {
         <section class="panel sidecard">
           <div class="k">Lưu ở đâu</div>
           <h4>Chỉ trong trình duyệt này</h4>
-          <p>Token và địa chỉ nằm trong <span class="mono">localStorage</span>. Chúng chỉ rời máy khi bạn gọi chính máy chủ đã nhập.</p>
           <div class="kv"><span>Khóa lưu</span><b title="${esc(SETTINGS_KEY)}">localStorage</b></div>
           <div class="kv"><span>Token</span><b class="mono-ellipsis">${esc(maskToken(state.settings.token))}</b></div>
           <div class="kv"><span>Phiên bản</span><b>1.0</b></div>
@@ -87,11 +85,10 @@ export function settingsPageHTML(state) {
         <section class="panel sidecard">
           <div class="k">HTTPS &amp; CORS</div>
           <h4>Để trình duyệt gọi được API</h4>
-          <p>Trang HTTPS chỉ gọi được máy chủ HTTPS (trừ localhost). Máy chủ cần cho phép origin này qua <span class="mono">CORS_ORIGINS</span>; nếu không, trình duyệt sẽ chặn phản hồi.</p>
+          <p>Máy chủ cần cho phép origin này qua <span class="mono">CORS_ORIGINS</span>.</p>
         </section>
         <section class="panel sidecard">
           <div class="k">Bảo mật</div>
-          <p>Không dùng trên máy chia sẻ. Token quản trị cho phép thay đổi ứng dụng, phiên bản và APK trên máy chủ.</p>
           <button type="button" class="mini danger" data-act="clearSettings" ${state.settings.token || state.catalogLoaded ? "" : "disabled"}>${svg("trash", 12)} Xoá thông tin đã lưu</button>
         </section>
       </aside>

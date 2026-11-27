@@ -299,8 +299,70 @@ html[data-theme="dark"] .skel::after {
 .file .fbadges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .file .fabi { margin-left: 2px; }
 .file .hashok { color: var(--ok-ink); font-size: 11px; font-weight: 700; }
-.up-hint { font-size: 12px; line-height: 1.55; color: var(--mute); margin-top: 9px; }
-.up-hint b { color: var(--ink); }
+
+/* Read-only upload summary */
+.upsummary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--soft);
+  border-radius: 14px;
+  padding: 11px;
+  margin-bottom: 2px;
+}
+.upsummary .kv {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.upsummary .kv:last-child { border-bottom: 0; }
+.upsummary .kv > span { color: var(--mute); font-weight: 700; }
+.upsummary .kv > b { text-align: right; min-width: 0; }
+.readbox {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 9px 10px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+.readbox b { font-size: 13px; font-weight: 800; }
+.readbox .mono { font-size: 11px; color: var(--mute); }
+.iconpair {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  margin: 2px 0 6px;
+}
+.iconpair .icbox { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.iconpair .icbig {
+  width: 64px;
+  height: 64px;
+  aspect-ratio: auto;
+  border-radius: 18px;
+  font-size: 24px;
+}
+.iconpair .iclabel { font-size: 10px; }
+.apkicon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  overflow: hidden;
+  flex: none;
+  display: grid;
+  place-items: center;
+  background: var(--tint);
+  color: var(--ink-soft);
+}
+.apkicon img { width: 100%; height: 100%; object-fit: cover; }
+.apkicon .letter { font-size: 12px; font-weight: 800; }
+.apkicon.loading { background: var(--soft); }
 
 /* APK preview read in the browser before upload */
 .file.inspecting { border-style: dashed; }
@@ -314,6 +376,8 @@ html[data-theme="dark"] .skel::after {
 }
 .file .fstat.bad { color: var(--danger); }
 .file .fstat.muted { font-weight: 600; }
+.file select { color: var(--ink); background: var(--soft); }
+.field select { color: var(--ink); background: var(--surface-raised); }
 .file select.override { border-color: var(--coral-deep); background: var(--coral-wash); color: var(--danger); }
 .file .ovr { font-size: 10px; font-weight: 800; color: var(--danger); }
 

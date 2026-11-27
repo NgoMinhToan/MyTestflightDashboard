@@ -25,6 +25,30 @@ export const REAL_MANIFEST_EXPECTED = {
   artifactAbi: "arm64-v8a",
 };
 
+/** Real `resources.arsc` and icon XML extracted from the workspace release APK. */
+export const REAL_RESOURCES_ARSC = Uint8Array.from(
+  readFileSync(join(HERE, "fixtures/resources.arsc")),
+);
+export const REAL_ADAPTIVE_XML = Uint8Array.from(
+  readFileSync(join(HERE, "fixtures/res/BW.xml")),
+);
+export const REAL_VECTOR_XML = Uint8Array.from(
+  readFileSync(join(HERE, "fixtures/res/Qr.xml")),
+);
+
+export const REAL_ICON_EXPECTED = {
+  label: "My TestFlight",
+  labelResourceId: 0x7f0e0005,
+  adaptiveResourceId: 0x7f0b0000,
+  adaptiveEntry: "res/BW.xml",
+  backgroundResourceId: 0x7f040005,
+  backgroundArgb: 0xffff4f40,
+  foregroundResourceId: 0x7f060007,
+  foregroundEntry: "res/Qr.xml",
+  vectorPaths: 2,
+  vectorFill: 0xffffffff,
+};
+
 /* ------------------------------------------------------------------- CRC32 */
 
 const CRC_TABLE = (() => {
@@ -208,6 +232,8 @@ const ATTR_TYPES = {
   hex: 0x11,
   bool: 0x12,
   ref: 0x01,
+  color: 0x1c,
+  float: 0x04,
 };
 
 function encodeUtf8Length(value) {
@@ -269,18 +295,18 @@ function buildStringPool(strings, utf8) {
 
 function collectStrings(elements) {
   const seen = new Set();
-  const add = (value) => {
-    if (value != null) seen.add(String(value));
-  };
-  for (const element of elements) {
-    add(element.name);
+  const visit = (element) => {
+    if (element == null) return;
+    if (element.name != null) seen.add(String(element.name));
     for (const attribute of element.attrs || []) {
-      add(attribute.name);
+      if (attribute.name != null) seen.add(String(attribute.name));
       const type = attribute.type || "string";
-      if (type === "string") add(attribute.value);
-      if (typeof attribute.raw === "string") add(attribute.raw);
+      if (type === "string") seen.add(String(attribute.value));
+      if (typeof attribute.raw === "string") seen.add(attribute.raw);
     }
-  }
+    for (const child of element.children || []) visit(child);
+  };
+  for (const element of elements) visit(element);
   return [...seen];
 }
 
@@ -321,14 +347,31 @@ function buildStartElement(element, indexOf) {
     let data = 0;
     if (dataType === 0x03) data = indexOf(attribute.value);
     else if (dataType === 0x12) data = attribute.value ? 1 : 0;
-    else if (dataType === 0x01) data = 0;
-    else data = Number(attribute.value) | 0;
+    else if (dataType === 0x01 || dataType === 0x1c) data = Number(attribute.value) | 0;
+    else if (dataType === 0x04) {
+      const float = Buffer.alloc(4);
+      float.writeFloatLE(Number(attribute.value) || 0, 0);
+      float.copy(output, offset + 16);
+      return;
+    } else data = Number(attribute.value) | 0;
     output.writeUInt32LE(data >>> 0, offset + 16);
   });
   return output;
 }
 
-/** Build a binary XML document from a declarative element list. */
+function buildEndElement(name, indexOf) {
+  const output = Buffer.alloc(24);
+  output.writeUInt16LE(0x0103, 0);
+  output.writeUInt16LE(16, 2);
+  output.writeUInt32LE(24, 4);
+  output.writeUInt32LE(1, 8);
+  output.writeUInt32LE(0xffffffff, 12);
+  output.writeUInt32LE(0xffffffff, 16);
+  output.writeUInt32LE(indexOf(name), 20);
+  return output;
+}
+
+/** Build a binary XML document from a declarative, possibly nested element list. */
 export function buildAxml({ utf8 = true, elements = [] } = {}) {
   const strings = collectStrings(elements);
   const indexOf = (value) => {
@@ -337,7 +380,13 @@ export function buildAxml({ utf8 = true, elements = [] } = {}) {
     return index;
   };
   const pool = buildStringPool(strings, utf8);
-  const chunks = elements.map((element) => buildStartElement(element, indexOf));
+  const chunks = [];
+  const visit = (element) => {
+    chunks.push(buildStartElement(element, indexOf));
+    for (const child of element.children || []) visit(child);
+    chunks.push(buildEndElement(element.name, indexOf));
+  };
+  for (const element of elements) visit(element);
   const body = Buffer.concat([pool, ...chunks]);
   const header = Buffer.alloc(8);
   header.writeUInt16LE(0x0003, 0);
@@ -356,6 +405,10 @@ export function buildManifest(options = {}) {
     versionCode = 7,
     versionName = "1.2.3",
     versionNameRef = false,
+    versionNameRefId = 0,
+    labelRef = null,
+    iconRef = null,
+    roundIconRef = null,
     minSdk = 26,
     minSdkCodename = null,
     targetSdk = 35,
@@ -371,7 +424,7 @@ export function buildManifest(options = {}) {
     { name: "versionCode", type: "int", value: versionCode },
   ];
   if (versionNameRef) {
-    manifestAttributes.push({ name: "versionName", type: "ref", value: 0 });
+    manifestAttributes.push({ name: "versionName", type: "ref", value: versionNameRefId });
   } else if (versionName != null) {
     manifestAttributes.push({ name: "versionName", type: "string", value: versionName });
   }
@@ -397,6 +450,15 @@ export function buildManifest(options = {}) {
   if (sdkAttributes.length) elements.push({ name: "uses-sdk", attrs: sdkAttributes });
 
   const applicationAttributes = [];
+  if (labelRef != null) {
+    applicationAttributes.push({ name: "label", type: "ref", value: labelRef });
+  }
+  if (iconRef != null) {
+    applicationAttributes.push({ name: "icon", type: "ref", value: iconRef });
+  }
+  if (roundIconRef != null) {
+    applicationAttributes.push({ name: "roundIcon", type: "ref", value: roundIconRef });
+  }
   if (debuggable) {
     applicationAttributes.push({ name: "debuggable", type: "bool", value: true });
   }
@@ -444,4 +506,356 @@ export function realApk() {
     abis: ["arm64-v8a"],
     manifestMethod: 0,
   });
+}
+
+/** The shared real manifest plus the real ARSC and icon XML fixtures. */
+export function realApkWithResources() {
+  return makeApk({
+    manifest: REAL_MANIFEST_AXML,
+    abis: ["arm64-v8a"],
+    manifestMethod: 0,
+    extras: [
+      { name: "resources.arsc", data: REAL_RESOURCES_ARSC, method: 0 },
+      { name: "res/BW.xml", data: REAL_ADAPTIVE_XML, method: 0 },
+      { name: "res/Qr.xml", data: REAL_VECTOR_XML, method: 0 },
+    ],
+  });
+}
+
+/* --------------------------------------------------------- resources.arsc */
+
+function writeLocale(buffer, offset, text) {
+  const value = String(text || "");
+  if (!value) return;
+  if (value.length === 2) {
+    buffer.writeUInt8(value.charCodeAt(0), offset);
+    buffer.writeUInt8(value.charCodeAt(1), offset + 1);
+  }
+}
+
+function buildConfigBytes(config = {}) {
+  const buffer = Buffer.alloc(64);
+  buffer.writeUInt32LE(64, 0);
+  if (config.mcc) buffer.writeUInt16LE(config.mcc, 4);
+  if (config.mnc) buffer.writeUInt16LE(config.mnc, 6);
+  writeLocale(buffer, 8, config.language);
+  writeLocale(buffer, 10, config.country);
+  if (config.density) buffer.writeUInt16LE(config.density, 14);
+  if (config.sdkVersion) buffer.writeUInt16LE(config.sdkVersion, 24);
+  return buffer;
+}
+
+function configKey(config = {}) {
+  return JSON.stringify([
+    config.language || "",
+    config.country || "",
+    config.density || 0,
+    config.sdkVersion || 0,
+    config.mcc || 0,
+    config.mnc || 0,
+  ]);
+}
+
+function valueTypeAndData(value, stringIndex) {
+  switch (value?.type || "string") {
+    case "reference":
+      return { type: 0x01, data: Number(value.value) >>> 0 };
+    case "color":
+      return { type: 0x1c, data: Number(value.value) >>> 0 };
+    case "int":
+      return { type: 0x10, data: Number(value.value) | 0 };
+    case "hex":
+      return { type: 0x11, data: Number(value.value) >>> 0 };
+    case "bool":
+      return { type: 0x12, data: value.value ? 1 : 0 };
+    case "string":
+    default:
+      return { type: 0x03, data: stringIndex(String(value?.value ?? "")) };
+  }
+}
+
+function buildTypeSpec(typeId, entryCount) {
+  const size = 16 + entryCount * 4;
+  const buffer = Buffer.alloc(size);
+  buffer.writeUInt16LE(0x0202, 0);
+  buffer.writeUInt16LE(16, 2);
+  buffer.writeUInt32LE(size, 4);
+  buffer.writeUInt8(typeId, 8);
+  buffer.writeUInt8(0, 9);
+  buffer.writeUInt16LE(0, 10);
+  buffer.writeUInt32LE(entryCount, 12);
+  return buffer;
+}
+
+function buildTypeChunk(
+  typeId,
+  entries,
+  config,
+  configsForEntry,
+  keyIndexOf,
+  stringIndexOf,
+) {
+  const headerSize = 20 + 64;
+  const entryCount = entries.length;
+  const offsetsSize = entryCount * 4;
+  const entryBuffers = [];
+  const offsets = new Array(entryCount).fill(0xffffffff);
+  let entryOffset = 0;
+  entries.forEach((entry, index) => {
+    const variant = configsForEntry(entry, configKey(config));
+    if (!variant) return;
+    const keyIndex = keyIndexOf(entry.key || `key_${typeId}_${index}`);
+    const value = valueTypeAndData(variant.value, stringIndexOf);
+    const buffer = Buffer.alloc(16);
+    buffer.writeUInt16LE(8, 0);
+    buffer.writeUInt16LE(0, 2);
+    buffer.writeUInt32LE(keyIndex, 4);
+    buffer.writeUInt16LE(8, 8);
+    buffer.writeUInt8(0, 10);
+    buffer.writeUInt8(value.type, 11);
+    buffer.writeUInt32LE(value.data >>> 0, 12);
+    offsets[index] = entryOffset;
+    entryOffset += buffer.length;
+    entryBuffers.push(buffer);
+  });
+  const entriesStart = headerSize + offsetsSize;
+  const size = entriesStart + entryOffset;
+  const buffer = Buffer.alloc(size);
+  buffer.writeUInt16LE(0x0201, 0);
+  buffer.writeUInt16LE(headerSize, 2);
+  buffer.writeUInt32LE(size, 4);
+  buffer.writeUInt8(typeId, 8);
+  buffer.writeUInt8(0, 9);
+  buffer.writeUInt16LE(0, 10);
+  buffer.writeUInt32LE(entryCount, 12);
+  buffer.writeUInt32LE(entriesStart, 16);
+  buildConfigBytes(config).copy(buffer, 20);
+  offsets.forEach((offset, index) => {
+    buffer.writeUInt32LE(offset >>> 0, headerSize + index * 4);
+  });
+  let cursor = entriesStart;
+  for (const entry of entryBuffers) {
+    entry.copy(buffer, cursor);
+    cursor += entry.length;
+  }
+  return buffer;
+}
+
+/**
+ * Build a minimal `resources.arsc`.
+ *
+ * types: [{
+ *   name: "string", id?: 1,
+ *   entries: [{
+ *     key: "app_name",
+ *     configs: [{ config: { language?: "en", density?: 320 }, value: { type, value } }]
+ *   }]
+ * }]
+ */
+export function buildResourcesTable({
+  packageId = 0x7f,
+  packageName = "com.example.fixture",
+  types = [],
+  globalStrings = [],
+} = {}) {
+  const strings = [...globalStrings];
+  const stringIndexOf = (text) => {
+    let index = strings.indexOf(text);
+    if (index < 0) {
+      strings.push(text);
+      index = strings.length - 1;
+    }
+    return index;
+  };
+  const keys = [];
+  const keyIndexOf = (key) => {
+    let index = keys.indexOf(key);
+    if (index < 0) {
+      keys.push(key);
+      index = keys.length - 1;
+    }
+    return index;
+  };
+  const normalizedTypes = types.map((type, index) => ({
+    id: type.id ?? index + 1,
+    name: String(type.name || `type${index + 1}`),
+    entries: (type.entries || []).map((entry) => {
+      const variants = entry.configs || [
+        { config: entry.config || {}, value: entry.value },
+      ];
+      const prompt = variants.map((variant) => ({
+        config: variant.config || {},
+        value: variant.value || {},
+      }));
+      for (const variant of prompt) {
+        if ((variant.value.type || "string") === "string") {
+          stringIndexOf(String(variant.value.value ?? ""));
+        }
+      }
+      keyIndexOf(entry.key || "");
+      return { key: entry.key || "", configs: prompt };
+    }),
+  }));
+
+  const typeStringsPool = buildStringPool(
+    normalizedTypes.map((type) => type.name),
+    true,
+  );
+  const keyStringsPool = buildStringPool(keys, true);
+
+  const bodyParts = [];
+  for (const type of normalizedTypes) {
+    bodyParts.push(buildTypeSpec(type.id, type.entries.length));
+    const configKeys = new Set();
+    for (const entry of type.entries) {
+      for (const variant of entry.configs) configKeys.add(configKey(variant.config));
+    }
+    for (const key of configKeys) {
+      const config = type.entries
+        .flatMap((entry) => entry.configs)
+        .find((variant) => configKey(variant.config) === key)?.config;
+      bodyParts.push(
+        buildTypeChunk(
+          type.id,
+          type.entries,
+          config || {},
+          (entry) =>
+            entry.configs.find((variant) => configKey(variant.config) === key),
+          keyIndexOf,
+          stringIndexOf,
+        ),
+      );
+    }
+  }
+
+  const packageHeader = Buffer.alloc(288);
+  packageHeader.writeUInt16LE(0x0200, 0);
+  packageHeader.writeUInt16LE(288, 2);
+  packageHeader.writeUInt32LE(0, 4); // patched below
+  packageHeader.writeUInt32LE(packageId >>> 0, 8);
+  Buffer.from(packageName, "utf16le")
+    .subarray(0, 255)
+    .copy(packageHeader, 12);
+  packageHeader.writeUInt32LE(288, 268);
+  packageHeader.writeUInt32LE(normalizedTypes.length, 272);
+  packageHeader.writeUInt32LE(288 + typeStringsPool.length, 276);
+  packageHeader.writeUInt32LE(keys.length, 280);
+
+  const packageBody = Buffer.concat([
+    packageHeader,
+    typeStringsPool,
+    keyStringsPool,
+    ...bodyParts,
+  ]);
+  packageBody.writeUInt32LE(packageBody.length, 4);
+
+  const globalPool = buildStringPool(strings, true);
+  const header = Buffer.alloc(12);
+  header.writeUInt16LE(0x0002, 0);
+  header.writeUInt16LE(12, 2);
+  header.writeUInt32LE(12 + globalPool.length + packageBody.length, 4);
+  header.writeUInt32LE(1, 8);
+  return Uint8Array.from(Buffer.concat([header, globalPool, packageBody]));
+}
+
+/* ---------------------------------------------------------- icon XML fixtures */
+
+export function buildVectorXml({
+  viewportWidth = 108,
+  viewportHeight = 108,
+  paths = [],
+  groups = [],
+} = {}) {
+  const vector = {
+    name: "vector",
+    attrs: [
+      { name: "width", type: "float", value: viewportWidth },
+      { name: "height", type: "float", value: viewportHeight },
+      { name: "viewportWidth", type: "float", value: viewportWidth },
+      { name: "viewportHeight", type: "float", value: viewportHeight },
+    ],
+    children: [],
+  };
+  const pathElement = (path) => ({
+    name: "path",
+    attrs: [
+      { name: "pathData", type: "string", value: path.pathData },
+      ...(path.fillColor != null
+        ? [{ name: "fillColor", type: "color", value: path.fillColor }]
+        : []),
+      ...(path.fillAlpha != null
+        ? [{ name: "fillAlpha", type: "float", value: path.fillAlpha }]
+        : []),
+      ...(path.strokeColor != null
+        ? [{ name: "strokeColor", type: "color", value: path.strokeColor }]
+        : []),
+      ...(path.strokeWidth != null
+        ? [{ name: "strokeWidth", type: "float", value: path.strokeWidth }]
+        : []),
+      ...(path.fillType != null
+        ? [{ name: "fillType", type: "string", value: path.fillType }]
+        : []),
+    ],
+  });
+  vector.children = paths.map(pathElement);
+  for (const group of groups) {
+    vector.children.push({
+      name: "group",
+      attrs: [
+        ...(group.rotation != null
+          ? [{ name: "rotation", type: "float", value: group.rotation }]
+          : []),
+        ...(group.pivotX != null
+          ? [{ name: "pivotX", type: "float", value: group.pivotX }]
+          : []),
+        ...(group.pivotY != null
+          ? [{ name: "pivotY", type: "float", value: group.pivotY }]
+          : []),
+        ...(group.scaleX != null
+          ? [{ name: "scaleX", type: "float", value: group.scaleX }]
+          : []),
+        ...(group.scaleY != null
+          ? [{ name: "scaleY", type: "float", value: group.scaleY }]
+          : []),
+        ...(group.translateX != null
+          ? [{ name: "translateX", type: "float", value: group.translateX }]
+          : []),
+        ...(group.translateY != null
+          ? [{ name: "translateY", type: "float", value: group.translateY }]
+          : []),
+      ],
+      children: (group.paths || []).map(pathElement),
+    });
+  }
+  return buildAxml({ elements: [vector] });
+}
+
+/**
+ * Build an adaptive-icon XML. `background`/`foreground` are `{ ref }` (a
+ * resource id) or `{ color }` (an ARGB colour).
+ */
+export function buildAdaptiveXml({ background, foreground, monochrome } = {}) {
+  const drawable = (value) => {
+    if (!value) return null;
+    if (value.ref != null) return { name: "drawable", type: "ref", value: value.ref };
+    if (value.color != null) {
+      return { name: "drawable", type: "color", value: value.color };
+    }
+    return null;
+  };
+  const root = {
+    name: "adaptive-icon",
+    attrs: [],
+    children: [
+      { name: "background", attrs: [drawable(background)].filter(Boolean) },
+      { name: "foreground", attrs: [drawable(foreground)].filter(Boolean) },
+    ],
+  };
+  if (monochrome) {
+    root.children.push({
+      name: "monochrome",
+      attrs: [drawable(monochrome)].filter(Boolean),
+    });
+  }
+  return buildAxml({ elements: [root] });
 }

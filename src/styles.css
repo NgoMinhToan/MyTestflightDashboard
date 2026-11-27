@@ -2,11 +2,11 @@
     --coral:#FF4F40; --coral-deep:#D93A2B; --coral-dark:#B92E22;
     --navy:#091723; --cream:#FFF1ED;
     --bg:#FFF1ED; --surface:#fff; --surface-raised:#FFFCFB; --soft:#FFF8F5; --soft-warm:#FFF8F5; --tint:#FFF1ED;
-    --line:#F2E7E2; --line-soft:var(--line-soft); --line-strong:var(--line-strong); --line-coral:var(--line-coral); --line-danger:var(--line-danger);
-    --track:var(--track); --scroll:var(--scroll);
-    --mute:var(--mute); --ink:#091723; --ink-soft:var(--ink-soft);
-    --danger:var(--danger); --warn-ink:var(--warn-ink); --ok-ink:var(--ok-ink); --ok-bg:var(--ok-bg); --ok-dot:var(--ok-dot);
-    --coral-wash:var(--coral-wash); --selection:var(--selection);
+    --line:#F2E7E2; --line-soft:#F8F1ED; --line-strong:#E5D6D0; --line-coral:#FFC9C1; --line-danger:#F0C2B9;
+    --track:#F3E9E5; --scroll:#D9C9C3;
+    --mute:#5C6B78; --ink:#091723; --ink-soft:#3C4B58;
+    --danger:#B23A2B; --warn-ink:#7A5000; --ok-ink:#0D5F55; --ok-bg:#E7F7F0; --ok-dot:#1FA97B;
+    --coral-wash:#FFF0EC; --selection:#FFD3CB;
     --sans:'Plus Jakarta Sans',system-ui,sans-serif; --mono:'IBM Plex Mono',ui-monospace,monospace;
     --shadow:0 14px 40px rgba(9,23,35,.08);
   }
@@ -17,6 +17,9 @@
   button{cursor:pointer;border:0;background:none}
   a{color:inherit}
   ::selection{background:var(--selection);color:var(--ink)}
+  select{color:var(--ink);background-color:var(--surface)}
+  option{color:var(--ink);background-color:var(--surface)}
+  select option:checked,select option:checked:hover{background:var(--selection);color:var(--ink)}
   .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
   .mono{font-family:var(--mono)}
 
@@ -312,7 +315,6 @@
   .icdrop h4{font-size:15px;font-weight:800;letter-spacing:-.02em}
   .icdrop p{font-size:12px;line-height:1.5;color:var(--mute);margin-top:4px}
   .icdrop .btn{margin-top:11px}
-  .icnote{font-size:11px;line-height:1.55;color:var(--mute);margin-top:10px}
   .icrow{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
 
   /* new app */
@@ -389,9 +391,9 @@
   .dev,.tag,.abi,.art .sha,.art .def,.matrix .hint,.mxlegend,.sidecard .k,.sidecard .kv,.healthrow .ok,
   .dhead .kick,.file .nm,.file .sz,.file .pr,.file select,.iclabel,.field label,.field .hint,.dfoot .hint{font-size:12px}
   .astat .k,.sidecard .k,.dhead .kick,.iclabel{letter-spacing:.09em}
-  .vnote,.draftzone .dz,.draftzone b,.matrix .hint,.sidecard p,.drop p,.icdrop p,.icdrop h4,.icnote,
+  .vnote,.draftzone .dz,.draftzone b,.matrix .hint,.sidecard p,.drop p,.icdrop p,.icdrop h4,
   .dhead p,.overall,.overall span{font-size:14px}
-  .vnote,.sidecard p,.matrix .hint,.drop p,.icdrop p,.icnote,.dhead p{line-height:1.6}
+  .vnote,.sidecard p,.matrix .hint,.drop p,.icdrop p,.dhead p{line-height:1.6}
   .field input,.field select,.field textarea{font-size:14px}
   .field .hint,.dfoot .hint{font-size:12px}
   .abi{font-size:12px}
@@ -412,13 +414,11 @@
   .art .sha{max-width:120px}
   .file .nm{font-size:12px}
   .curl{font-size:12px}
-
   .badge{font-size:12px}
   .icon-tile:after{font-size:12px}
   .gsearch kbd{font-size:12px}
   .mxcell .vcode{font-size:12px}
   .healthrow .ok{font-size:12px}
-  .icnote{font-size:14px}
   .mxcell .mchip.na{color:var(--mute)}
   .tag{background:var(--surface);color:var(--ink)}
   .dev{color:rgba(9,23,35,.84)}

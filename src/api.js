@@ -19,8 +19,14 @@ function friendlyMessage(code, fallback) {
       return "Máy chủ chưa cấu hình management_key (data/config.json).";
     case "app_exists":
       return "App ID này đã tồn tại.";
+    case "package_in_use":
+      return "Package này đã thuộc một ứng dụng khác.";
+    case "package_locked":
+      return "Không thể đổi package khi ứng dụng đã có APK.";
     case "version_exists":
       return "Phiên bản này đã tồn tại.";
+    case "version_name_invalid":
+      return "Tên phiên bản không hợp lệ (tối đa 200 byte, không chứa /, \\).";
     case "payload_too_large":
       return "Tệp vượt quá giới hạn máy chủ cho phép.";
     case "unsupported_media_type":
@@ -50,7 +56,7 @@ function friendlyMessage(code, fallback) {
 
 const MISMATCH_KINDS = ["package", "version", "sdk", "abi"];
 
-/** Normalise `allow_mismatch` to the canonical, deduplicated CSV order. */
+/** Kept for API/CLI compatibility; the dashboard upload flow no longer sends it. */
 export function allowMismatchQuery(value) {
   const list = Array.isArray(value) ? value : String(value ?? "").split(",");
   const selected = new Set(
@@ -211,13 +217,18 @@ export class ApiClient {
     return this.request(`/api/v1/apps/${encode(appId)}`, { method: "DELETE" });
   }
 
-  uploadIcon(appId, file) {
-    return this.request(`/api/v1/apps/${encode(appId)}/icon`, {
+  putIcon(appId, blob, { ifMissing = false } = {}) {
+    const query = ifMissing ? "?if_missing=1" : "";
+    return this.request(`/api/v1/apps/${encode(appId)}/icon${query}`, {
       method: "PUT",
-      headers: { "Content-Type": file.type },
-      body: file,
+      headers: { "Content-Type": blob.type || "image/png" },
+      body: blob,
       timeout: 60000,
     });
+  }
+
+  uploadIcon(appId, file) {
+    return this.putIcon(appId, file, { ifMissing: false });
   }
 
   deleteIcon(appId) {
@@ -253,7 +264,82 @@ export class ApiClient {
   }
 
   /**
+   * APK-only import. The server reads the APK again and resolves the app,
+   * version, versionCode, minSdk and ABI; the dashboard only sends the
+   * binding hints and release metadata.
+   *
+   * Params: { appId, create, name, version, releaseNotes, publishedAt }.
+   */
+  importApk(file, params = {}, { onProgress, signal } = {}) {
+    return new Promise((resolve, reject) => {
+      const query = new URLSearchParams();
+      if (params.appId) query.set("appId", params.appId);
+      if (params.create) query.set("create", "1");
+      if (params.name) query.set("name", params.name);
+      if (params.version) query.set("version", params.version);
+      if (params.releaseNotes) query.set("releaseNotes", params.releaseNotes);
+      if (params.publishedAt) query.set("publishedAt", params.publishedAt);
+      const suffix = query.toString();
+      const target = this.url(`/api/v1/import${suffix ? `?${suffix}` : ""}`);
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", target, true);
+      xhr.setRequestHeader("Content-Type", "application/vnd.android.package-archive");
+      if (this.token) xhr.setRequestHeader(TOKEN_HEADER, this.token);
+      xhr.upload.addEventListener("progress", (event) => {
+        if (event.lengthComputable && event.total > 0) {
+          onProgress?.(Math.max(0, Math.min(1, event.loaded / event.total)));
+        }
+      });
+      xhr.addEventListener("load", () => {
+        let parsed = null;
+        try {
+          parsed = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+        } catch {
+          /* ignore */
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(parsed);
+          return;
+        }
+        const code = parsed?.error?.code || `http_${xhr.status}`;
+        reject(
+          new ApiError(
+            xhr.status,
+            code,
+            friendlyMessage(
+              code,
+              parsed?.error?.message || `Tải APK thất bại (HTTP ${xhr.status}).`,
+            ),
+            parsed,
+          ),
+        );
+      });
+      xhr.addEventListener("error", () => {
+        reject(
+          new ApiError(
+            0,
+            "network_error",
+            "Mất kết nối khi đang tải APK. Kiểm tra mạng và CORS.",
+          ),
+        );
+      });
+      xhr.addEventListener("abort", () => {
+        reject(new ApiError(0, "aborted", "Đã huỷ tải APK."));
+      });
+      if (signal) {
+        if (signal.aborted) {
+          reject(new ApiError(0, "aborted", "Đã huỷ tải APK."));
+          return;
+        }
+        signal.addEventListener("abort", () => xhr.abort(), { once: true });
+      }
+      xhr.send(file);
+    });
+  }
+
+  /**
    * XHR is used for APK uploads because fetch does not expose upload progress.
+   * Kept for the legacy createVersion + PUT-artifacts flow used by API/CLI.
    */
   uploadArtifact(
     appId,

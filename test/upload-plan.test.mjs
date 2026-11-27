@@ -2,14 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  appIdFromPackage,
   applyInspection,
   applyInspectionError,
-  applyPrefill,
-  computeAllowMismatch,
-  isFieldTouched,
-  matchAppByPackage,
+  buildUploadPlan,
+  computeVersionConflicts,
+  effectiveAbi,
+  effectiveVersionName,
+  humanizePackage,
+  isPlaceholderApp,
   refreshUploadValidation,
-  selectAppForPackage,
+  resolveUploadTarget,
   validateUploadFiles,
 } from "../src/upload-plan.js";
 
@@ -18,6 +21,8 @@ function metadata(overrides = {}) {
     packageName: "com.example.app",
     versionCode: 7,
     versionName: "1.2.3",
+    versionNameSource: "literal",
+    label: "Example App",
     minSdk: 26,
     targetSdk: 35,
     abis: ["arm64-v8a"],
@@ -27,6 +32,7 @@ function metadata(overrides = {}) {
     split: null,
     configSplit: false,
     artifactAbi: "arm64-v8a",
+    icon: null,
     ...overrides,
   };
 }
@@ -38,10 +44,10 @@ function file(id, overrides = {}) {
     sizeBytes: 1024,
     abi: "arm64-v8a",
     detectedAbi: null,
-    abiOverridden: false,
     status: "inspecting",
     metadata: null,
     error: "",
+    errorCode: "",
     previewUnavailable: false,
     previewMessage: "",
     progress: 0,
@@ -63,16 +69,9 @@ function readyFile(id, overrides = {}) {
 
 function makeUpload(overrides = {}) {
   return {
-    appId: "app",
-    existingVersion: false,
-    versionName: "1.2.3",
-    versionCode: "7",
-    minSdk: "26",
-    touched: { versionName: false, versionCode: false, minSdk: false },
+    expectedAppId: null,
     files: [],
-    explicitApp: false,
-    appTouched: false,
-    consistency: { fatal: [], warnings: [], inspecting: false },
+    consistency: { fatal: [], warnings: [], inspecting: false, detected: null },
     ...overrides,
   };
 }
@@ -83,22 +82,23 @@ function codes(items) {
 
 /* ------------------------------------------------------------- inspection */
 
-test("applyInspection stores metadata and lets it win over the filename guess", () => {
-  const upload = makeUpload({ files: [file("a", { abi: "arm64-v8a" })] });
-  const stored = applyInspection(upload, "a", metadata({ artifactAbi: "x86_64" }));
+test("applyInspection stores metadata and trusts the APK ABI", () => {
+  const upload = makeUpload({ files: [file("a", { abi: "x86_64" })] });
+  const stored = applyInspection(upload, "a", metadata({ artifactAbi: "arm64-v8a" }));
   assert.equal(stored.status, "ready");
-  assert.equal(stored.abi, "x86_64");
-  assert.equal(stored.detectedAbi, "x86_64");
-  assert.deepEqual(stored.metadata.abis, ["arm64-v8a"]);
+  assert.equal(stored.abi, "arm64-v8a");
+  assert.equal(stored.detectedAbi, "arm64-v8a");
+  assert.equal(stored.metadata.label, "Example App");
 });
 
-test("applyInspection preserves an explicit ABI override", () => {
+test("applyInspection clears a previous inspection error", () => {
   const upload = makeUpload({
-    files: [file("a", { abi: "x86_64", abiOverridden: true })],
+    files: [file("a", { status: "error", error: "hỏng", errorCode: "invalid_apk" })],
   });
   const stored = applyInspection(upload, "a", metadata());
-  assert.equal(stored.abi, "x86_64");
-  assert.equal(stored.detectedAbi, "arm64-v8a");
+  assert.equal(stored.status, "ready");
+  assert.equal(stored.error, "");
+  assert.equal(stored.errorCode, "");
 });
 
 test("applyInspectionError blocks invalid APKs but allows preview_unavailable", () => {
@@ -122,163 +122,204 @@ test("applyInspectionError blocks invalid APKs but allows preview_unavailable", 
   assert.match(old.previewMessage, /Trình duyệt cũ/);
 });
 
-/* ----------------------------------------------------------------- prefill */
+/* ------------------------------------------------------------------ names */
 
-test("applyPrefill fills untouched fields from the inspected APK", () => {
+test("appIdFromPackage is deterministic and path-safe", () => {
+  assert.equal(appIdFromPackage("dev.minhtoan.mytestflight"), "dev.minhtoan.mytestflight");
+  assert.equal(appIdFromPackage("com.acme.CRM"), "com.acme.crm");
+  assert.equal(appIdFromPackage("com.acme.crm app"), "com.acme.crm-app");
+  assert.equal(appIdFromPackage("com/acme/crm"), "com-acme-crm");
+  assert.equal(appIdFromPackage("  "), "");
+  assert.equal(appIdFromPackage(".hidden"), "hidden");
+  assert.equal(appIdFromPackage("9lives.app"), "9lives.app");
+});
+
+test("humanizePackage falls back to the last segment", () => {
+  assert.equal(humanizePackage("com.acme.crm"), "Crm");
+  assert.equal(humanizePackage("dev.minhtoan.my_testflight"), "My Testflight");
+  assert.equal(humanizePackage(""), "Ứng dụng");
+});
+
+test("effectiveVersionName falls back to versionCode only when empty", () => {
+  assert.equal(effectiveVersionName(metadata()), "1.2.3");
+  assert.equal(effectiveVersionName(metadata({ versionName: "" })), "7");
+  assert.equal(effectiveVersionName(metadata({ versionName: null })), "7");
+  assert.equal(effectiveVersionName(null), null);
+});
+
+test("isPlaceholderApp honors the explicit packageBound flag", () => {
+  assert.equal(
+    isPlaceholderApp({
+      id: "com.example.raster",
+      packageName: "com.example.raster",
+      packageBound: true,
+    }),
+    false,
+  );
+  assert.equal(
+    isPlaceholderApp({
+      id: "crm",
+      packageName: "com.example.crm",
+      packageBound: false,
+    }),
+    true,
+  );
+  assert.equal(
+    isPlaceholderApp({ id: "x", packageName: "", packageBound: true }),
+    false,
+  );
+});
+
+test("isPlaceholderApp keeps the legacy fallback for older servers", () => {
+  assert.equal(isPlaceholderApp({ id: "crm", packageName: "" }), true);
+  assert.equal(isPlaceholderApp({ id: "crm", packageName: "crm" }), true);
+  assert.equal(isPlaceholderApp({ id: "crm", packageName: "com.acme.crm" }), false);
+  assert.equal(isPlaceholderApp(null), true);
+});
+
+/* ------------------------------------------------------------ target bind */
+
+test("resolveUploadTarget binds a unique catalog package", () => {
+  const catalog = [
+    { id: "one", name: "One", packageName: "com.one" },
+    { id: "com.example.app", name: "Example", packageName: "com.example.app" },
+  ];
+  const target = resolveUploadTarget(makeUpload({ files: [readyFile("a")] }), catalog);
+  assert.equal(target.status, "existing");
+  assert.equal(target.appId, "com.example.app");
+  assert.equal(target.create, false);
+  assert.deepEqual(target.fatal, []);
+});
+
+test("resolveUploadTarget plans an app from the APK label", () => {
+  const target = resolveUploadTarget(makeUpload({ files: [readyFile("a")] }), []);
+  assert.equal(target.status, "create");
+  assert.equal(target.create, true);
+  assert.equal(target.appId, null);
+  assert.equal(target.idHint, "com.example.app");
+  assert.equal(target.name, "Example App");
+  assert.equal(target.packageName, "com.example.app");
+  assert.deepEqual(codes(target.warnings), ["auto_create"]);
+});
+
+test("resolveUploadTarget humanizes the package when the label is missing", () => {
+  const file = readyFile("a", { metadata: metadata({ label: null }) });
+  const target = resolveUploadTarget(makeUpload({ files: [file] }), []);
+  assert.equal(target.name, "App");
+});
+
+test("resolveUploadTarget rejects duplicate catalog packages", () => {
+  const catalog = [
+    { id: "a", name: "A", packageName: "com.example.app" },
+    { id: "b", name: "B", packageName: "com.example.app" },
+  ];
+  const target = resolveUploadTarget(makeUpload({ files: [readyFile("a")] }), catalog);
+  assert.equal(target.status, "blocked");
+  assert.deepEqual(codes(target.fatal), ["duplicate_package"]);
+});
+
+test("resolveUploadTarget accepts a matching real package on the detail page", () => {
+  const catalog = [{ id: "example", name: "Example", packageName: "com.example.app" }];
+  const upload = makeUpload({ expectedAppId: "example", files: [readyFile("a")] });
+  const target = resolveUploadTarget(upload, catalog, "example");
+  assert.equal(target.status, "existing");
+  assert.equal(target.appId, "example");
+});
+
+test("resolveUploadTarget blocks a detail-page package mismatch", () => {
+  const catalog = [{ id: "other", name: "Other", packageName: "com.other.app" }];
+  const upload = makeUpload({ expectedAppId: "other", files: [readyFile("a")] });
+  const target = resolveUploadTarget(upload, catalog, "other");
+  assert.equal(target.status, "blocked");
+  assert.deepEqual(codes(target.fatal), ["detail_package_mismatch"]);
+  assert.match(target.fatal[0].message, /com\.example\.app/);
+});
+
+test("a bound app with id === package is not a placeholder", () => {
+  const catalog = [
+    {
+      id: "com.example.raster",
+      name: "Raster",
+      packageName: "com.example.raster",
+      packageBound: true,
+    },
+  ];
   const upload = makeUpload({
-    versionName: "9.9.9",
-    versionCode: "99",
-    minSdk: "21",
+    expectedAppId: "com.example.raster",
     files: [readyFile("a")],
   });
-  const applied = applyPrefill(upload);
-  assert.deepEqual(applied, {
-    versionName: true,
-    versionCode: true,
-    minSdk: true,
-  });
-  assert.equal(upload.versionName, "1.2.3");
-  assert.equal(upload.versionCode, "7");
-  assert.equal(upload.minSdk, "26");
+  const target = resolveUploadTarget(upload, catalog, "com.example.raster");
+  assert.equal(target.status, "blocked");
+  assert.deepEqual(codes(target.fatal), ["detail_package_mismatch"]);
+  assert.match(target.fatal[0].message, /com\.example\.app/);
+
+  const validation = validateUploadFiles(upload, catalog, "com.example.raster");
+  assert.ok(codes(validation.fatal).includes("detail_package_mismatch"));
 });
 
-test("applyPrefill never overwrites a field the user touched", () => {
-  const upload = makeUpload({
-    versionName: "9.9.9",
-    versionCode: "99",
-    minSdk: "21",
-    touched: { versionName: false, versionCode: true, minSdk: false },
-    files: [readyFile("a")],
-  });
-  const applied = applyPrefill(upload);
-  assert.equal(applied.versionCode, false);
-  assert.equal(upload.versionCode, "99");
-  assert.equal(upload.versionName, "1.2.3");
-  assert.equal(upload.minSdk, "26");
+test("resolveUploadTarget lets a placeholder app bind a real package", () => {
+  const catalog = [{ id: "crm", name: "CRM", packageName: "crm" }];
+  const upload = makeUpload({ expectedAppId: "crm", files: [readyFile("a")] });
+  const target = resolveUploadTarget(upload, catalog, "crm");
+  assert.equal(target.status, "existing");
+  assert.equal(target.appId, "crm");
+  assert.deepEqual(codes(target.warnings), ["package_bind"]);
 });
 
-test("applyPrefill accepts a Set of touched fields", () => {
-  const upload = makeUpload({
-    versionName: "9.9.9",
-    files: [readyFile("a")],
-  });
-  applyPrefill(upload, new Set(["versionName"]));
-  assert.equal(upload.versionName, "9.9.9");
-  assert.equal(upload.versionCode, "7");
+test("packageBound:false still allows a detail placeholder to bind", () => {
+  const catalog = [
+    {
+      id: "crm",
+      name: "CRM",
+      packageName: "com.acme.crm",
+      packageBound: false,
+    },
+  ];
+  const upload = makeUpload({ expectedAppId: "crm", files: [readyFile("a")] });
+  const target = resolveUploadTarget(upload, catalog, "crm");
+  assert.equal(target.status, "existing");
+  assert.equal(target.appId, "crm");
+  assert.deepEqual(codes(target.warnings), ["package_bind"]);
 });
 
-test("applyPrefill does nothing for an existing version modal", () => {
-  const upload = makeUpload({
-    existingVersion: true,
-    versionName: "0.2.0",
-    versionCode: "18",
-    minSdk: "26",
-    files: [readyFile("a")],
-  });
-  const applied = applyPrefill(upload);
-  assert.deepEqual(applied, {
-    versionName: false,
-    versionCode: false,
-    minSdk: false,
-  });
-  assert.equal(upload.versionName, "0.2.0");
-  assert.equal(upload.versionCode, "18");
+test("resolveUploadTarget reports a missing detail-page app", () => {
+  const upload = makeUpload({ expectedAppId: "gone", files: [readyFile("a")] });
+  const target = resolveUploadTarget(upload, [], "gone");
+  assert.equal(target.status, "blocked");
+  assert.deepEqual(codes(target.fatal), ["app_not_found"]);
 });
 
-test("applyPrefill leaves null manifest values alone", () => {
-  const upload = makeUpload({
-    versionName: "9.9.9",
-    minSdk: "21",
-    files: [
-      readyFile("a", {
-        metadata: metadata({ versionName: null, minSdk: null }),
-      }),
-    ],
+test("resolveUploadTarget leaves an unreadable APK to the server", () => {
+  const entry = file("old", {
+    status: "ready",
+    metadata: null,
+    previewUnavailable: true,
+    previewMessage: "Không xem trước được",
   });
-  const applied = applyPrefill(upload);
-  assert.equal(applied.versionName, false);
-  assert.equal(applied.minSdk, false);
-  assert.equal(upload.versionName, "9.9.9");
-  assert.equal(upload.minSdk, "21");
+  const target = resolveUploadTarget(makeUpload({ files: [entry] }), []);
+  assert.equal(target.status, "unknown");
+  assert.equal(target.create, true);
+  assert.deepEqual(target.fatal, []);
 });
 
-test("isFieldTouched understands objects and Sets", () => {
-  assert.equal(isFieldTouched(undefined, "versionCode"), false);
-  assert.equal(isFieldTouched({ versionCode: true }, "versionCode"), true);
-  assert.equal(isFieldTouched({ versionCode: false }, "versionCode"), false);
-  assert.equal(isFieldTouched(new Set(["sdk"]), "sdk"), true);
-  assert.equal(isFieldTouched(new Set(["sdk"]), "versionCode"), false);
-});
-
-/* ---------------------------------------------------------- allow_mismatch */
-
-test("computeAllowMismatch stays empty when the form matches the APK", () => {
-  const upload = makeUpload({ files: [readyFile("a")] });
-  assert.deepEqual(computeAllowMismatch(upload), []);
-});
-
-test("computeAllowMismatch adds version when a touched field differs", () => {
-  const upload = makeUpload({
-    versionCode: "8",
-    touched: { versionName: false, versionCode: true, minSdk: false },
-    files: [readyFile("a")],
-  });
-  assert.deepEqual(computeAllowMismatch(upload), ["version"]);
-
-  const same = makeUpload({
-    versionCode: "7",
-    touched: { versionName: false, versionCode: true, minSdk: false },
-    files: [readyFile("a")],
-  });
-  assert.deepEqual(computeAllowMismatch(same), []);
-});
-
-test("computeAllowMismatch adds sdk and abi when edited", () => {
-  const upload = makeUpload({
-    minSdk: "24",
-    touched: { versionName: false, versionCode: false, minSdk: true },
-    files: [readyFile("a", { abi: "x86_64", abiOverridden: true })],
-  });
-  assert.deepEqual(computeAllowMismatch(upload), ["sdk", "abi"]);
-});
-
-test("computeAllowMismatch uses the canonical CSV order", () => {
-  const upload = makeUpload({
-    versionName: "9.9.9",
-    versionCode: "8",
-    minSdk: "24",
-    touched: { versionName: true, versionCode: true, minSdk: true },
-    files: [readyFile("a", { abi: "universal", abiOverridden: true })],
-  });
-  assert.deepEqual(computeAllowMismatch(upload), ["version", "sdk", "abi"]);
-});
-
-test("computeAllowMismatch covers an explicit ABI when preview is unavailable", () => {
-  const upload = makeUpload({
-    files: [
-      file("a", {
-        status: "ready",
-        metadata: null,
-        previewUnavailable: true,
-        previewMessage: "Trình duyệt cũ",
-        abi: "x86_64",
-        abiOverridden: true,
-      }),
-    ],
-  });
-  assert.deepEqual(computeAllowMismatch(upload), ["abi"]);
-  assert.deepEqual(codes(validateUploadFiles(upload, null).warnings), [
-    "preview_unavailable",
-    "abi_override",
-  ]);
+test("resolveUploadTarget rejects an app-id collision", () => {
+  const catalog = [{ id: "com.example.app", name: "Other", packageName: "com.other.app" }];
+  const target = resolveUploadTarget(makeUpload({ files: [readyFile("a")] }), catalog);
+  assert.equal(target.status, "blocked");
+  assert.deepEqual(codes(target.fatal), ["app_id_conflict"]);
 });
 
 /* ------------------------------------------------------------- validation */
 
-test("validateUploadFiles reports inspecting files without blocking on them", () => {
-  const result = validateUploadFiles(makeUpload({ files: [file("a")] }), null);
+test("validateUploadFiles reports inspecting files without failing them", () => {
+  const result = validateUploadFiles(makeUpload({ files: [file("a")] }), []);
   assert.equal(result.inspecting, true);
-  assert.equal(result.fatal.length, 0);
+  assert.ok(!codes(result.fatal).includes("inspect_error"));
+});
+
+test("validateUploadFiles requires at least one file", () => {
+  const result = validateUploadFiles(makeUpload(), []);
+  assert.deepEqual(codes(result.fatal), ["no_files"]);
 });
 
 test("validateUploadFiles blocks invalid APKs and config splits", () => {
@@ -290,55 +331,36 @@ test("validateUploadFiles blocks invalid APKs and config splits", () => {
       }),
     ],
   });
-  const result = validateUploadFiles(upload, null);
+  const result = validateUploadFiles(upload, []);
   assert.deepEqual(codes(result.fatal), ["inspect_error", "config_split"]);
 });
 
 test("validateUploadFiles rejects duplicate ABIs without dropping a file", () => {
-  const upload = makeUpload({
-    files: [readyFile("a"), readyFile("b")],
-  });
-  const result = validateUploadFiles(upload, null);
+  const upload = makeUpload({ files: [readyFile("a"), readyFile("b")] });
+  const result = validateUploadFiles(upload, []);
   assert.deepEqual(codes(result.fatal), ["duplicate_abi"]);
   assert.equal(upload.files.length, 2);
 });
 
-test("validateUploadFiles catches package and version disagreement between files", () => {
-  const packages = makeUpload({
-    files: [
-      readyFile("a"),
-      readyFile("b", {
-        abi: "x86_64",
-        metadata: metadata({ packageName: "com.other.app", artifactAbi: "x86_64" }),
-      }),
+test("validateUploadFiles catches package, version and minSdk disagreement", () => {
+  const cases = [
+    [
+      metadata({ packageName: "com.other.app", artifactAbi: "x86_64" }),
+      "package_mismatch",
     ],
-  });
-  assert.ok(codes(validateUploadFiles(packages, null).fatal).includes("package_mismatch"));
-
-  const codesMismatch = makeUpload({
-    files: [
-      readyFile("a"),
-      readyFile("b", {
-        abi: "x86_64",
-        metadata: metadata({ versionCode: 8, artifactAbi: "x86_64" }),
-      }),
-    ],
-  });
-  assert.ok(codes(validateUploadFiles(codesMismatch, null).fatal).includes("version_mismatch"));
-
-  const namesMismatch = makeUpload({
-    files: [
-      readyFile("a"),
-      readyFile("b", {
-        abi: "x86_64",
-        metadata: metadata({ versionName: "2.0.0", artifactAbi: "x86_64" }),
-      }),
-    ],
-  });
-  assert.ok(codes(validateUploadFiles(namesMismatch, null).fatal).includes("version_mismatch"));
+    [metadata({ versionCode: 8, artifactAbi: "x86_64" }), "version_mismatch"],
+    [metadata({ versionName: "2.0.0", artifactAbi: "x86_64" }), "version_mismatch"],
+    [metadata({ minSdk: 24, artifactAbi: "x86_64" }), "sdk_mismatch"],
+  ];
+  for (const [meta, code] of cases) {
+    const upload = makeUpload({
+      files: [readyFile("a"), readyFile("b", { abi: "x86_64", metadata: meta })],
+    });
+    assert.ok(codes(validateUploadFiles(upload, []).fatal).includes(code), code);
+  }
 });
 
-test("validateUploadFiles ignores null versionName when comparing files", () => {
+test("validateUploadFiles ignores a null versionName when comparing files", () => {
   const upload = makeUpload({
     files: [
       readyFile("a"),
@@ -348,108 +370,144 @@ test("validateUploadFiles ignores null versionName when comparing files", () => 
       }),
     ],
   });
-  const result = validateUploadFiles(upload, null);
-  assert.equal(result.fatal.length, 0);
+  assert.equal(validateUploadFiles(upload, []).fatal.length, 0);
 });
 
-test("validateUploadFiles warns about debuggable, testOnly and an ABI override", () => {
+test("validateUploadFiles warns about debuggable and testOnly APKs", () => {
+  const catalog = [{ id: "example", name: "Example", packageName: "com.example.app" }];
   const upload = makeUpload({
-    files: [
-      readyFile("a", {
-        abi: "x86_64",
-        abiOverridden: true,
-        metadata: metadata({ debuggable: true, testOnly: true }),
-      }),
-    ],
+    files: [readyFile("a", { metadata: metadata({ debuggable: true, testOnly: true }) })],
   });
-  const result = validateUploadFiles(upload, null);
-  assert.deepEqual(codes(result.warnings), ["debuggable", "testOnly", "abi_override"]);
+  assert.deepEqual(codes(validateUploadFiles(upload, catalog).warnings), [
+    "debuggable",
+    "testOnly",
+  ]);
 });
 
-test("validateUploadFiles warns when the APK package differs from the app", () => {
-  const app = { id: "crm", packageName: "com.acme.crm" };
-  const mismatch = validateUploadFiles(makeUpload({ files: [readyFile("a")] }), app);
-  assert.ok(codes(mismatch.warnings).includes("app_package_mismatch"));
-
-  const placeholder = { id: "com.example.app", packageName: "com.example.app" };
-  const silent = validateUploadFiles(makeUpload({ files: [readyFile("a")] }), placeholder);
-  assert.ok(!codes(silent.warnings).includes("app_package_mismatch"));
-
-  const noPackage = { id: "crm", packageName: "" };
-  const empty = validateUploadFiles(makeUpload({ files: [readyFile("a")] }), noPackage);
-  assert.ok(!codes(empty.warnings).includes("app_package_mismatch"));
+test("validateUploadFiles warns when the browser could not preview an APK", () => {
+  const entry = file("old", {
+    status: "ready",
+    metadata: null,
+    previewUnavailable: true,
+    previewMessage: "Trình duyệt cũ",
+  });
+  const result = validateUploadFiles(makeUpload({ files: [entry] }), []);
+  assert.deepEqual(codes(result.warnings), ["preview_unavailable"]);
 });
 
-test("validateUploadFiles warns about manual version and sdk overrides", () => {
-  const upload = makeUpload({
-    versionCode: "8",
-    minSdk: "24",
-    touched: { versionName: false, versionCode: true, minSdk: true },
-    files: [readyFile("a")],
-  });
-  const result = validateUploadFiles(upload, null);
-  assert.ok(codes(result.warnings).includes("version_override"));
-  assert.ok(codes(result.warnings).includes("sdk_override"));
+test("validateUploadFiles carries auto-create and detail-binding information", () => {
+  const create = validateUploadFiles(makeUpload({ files: [readyFile("a")] }), []);
+  assert.equal(create.target.status, "create");
+  assert.ok(codes(create.warnings).includes("auto_create"));
+
+  const catalog = [{ id: "crm", name: "CRM", packageName: "crm" }];
+  const bind = validateUploadFiles(
+    makeUpload({ expectedAppId: "crm", files: [readyFile("a")] }),
+    catalog,
+    "crm",
+  );
+  assert.ok(codes(bind.warnings).includes("package_bind"));
 });
 
-test("validateUploadFiles warns when an existing version differs from the APK", () => {
-  const upload = makeUpload({
-    existingVersion: true,
-    versionName: "0.2.0",
-    versionCode: "8",
-    files: [
-      readyFile("a", {
-        metadata: metadata({ versionName: "0.2.0", versionCode: 7 }),
-      }),
-    ],
-  });
-  const result = validateUploadFiles(upload, null);
-  assert.ok(codes(result.warnings).includes("existing_version_mismatch"));
-  assert.deepEqual(computeAllowMismatch(upload), []);
+test("validateUploadFiles includes the detail package mismatch as fatal", () => {
+  const catalog = [{ id: "other", name: "Other", packageName: "com.other.app" }];
+  const result = validateUploadFiles(
+    makeUpload({ expectedAppId: "other", files: [readyFile("a")] }),
+    catalog,
+    "other",
+  );
+  assert.ok(codes(result.fatal).includes("detail_package_mismatch"));
 });
 
-test("refreshUploadValidation fills the derived modal fields", () => {
-  const upload = makeUpload({
-    versionCode: "8",
-    touched: { versionName: false, versionCode: true, minSdk: false },
-    files: [readyFile("a")],
-  });
-  const result = refreshUploadValidation(upload, { id: "app", packageName: "com.other" });
+/* --------------------------------------------------------------- conflicts */
+
+test("computeVersionConflicts separates replaced and new ABIs", () => {
+  const existing = {
+    artifacts: [{ abi: "arm64-v8a" }, { abi: "x86_64" }],
+  };
+  const files = [
+    readyFile("a", { abi: "arm64-v8a" }),
+    readyFile("b", {
+      abi: "armeabi-v7a",
+      metadata: metadata({ artifactAbi: "armeabi-v7a", abis: ["armeabi-v7a"] }),
+    }),
+  ];
+  const result = computeVersionConflicts(existing, files);
+  assert.deepEqual(result.replacedAbis, ["arm64-v8a"]);
+  assert.deepEqual(result.newAbis, ["armeabi-v7a"]);
+  assert.equal(result.conflict, true);
+});
+
+test("computeVersionConflicts does not ask when only new ABIs are added", () => {
+  const result = computeVersionConflicts({ artifacts: [{ abi: "arm64-v8a" }] }, [
+    readyFile("b", {
+      abi: "x86_64",
+      metadata: metadata({ artifactAbi: "x86_64", abis: ["x86_64"] }),
+    }),
+  ]);
+  assert.deepEqual(result.replacedAbis, []);
+  assert.deepEqual(result.newAbis, ["x86_64"]);
+  assert.equal(result.conflict, false);
+});
+
+test("computeVersionConflicts handles a missing version", () => {
+  const result = computeVersionConflicts(null, [readyFile("a")]);
+  assert.deepEqual(result.replacedAbis, []);
+  assert.deepEqual(result.newAbis, ["arm64-v8a"]);
+  assert.equal(result.conflict, false);
+});
+
+test("effectiveAbi falls back to the filename guess", () => {
+  assert.equal(effectiveAbi(readyFile("a")), "arm64-v8a");
+  assert.equal(effectiveAbi(file("b", { abi: "x86_64" })), "x86_64");
+});
+
+/* ------------------------------------------------------------------- plan */
+
+test("buildUploadPlan is ready only when files finished without fatal errors", () => {
+  const ready = buildUploadPlan(makeUpload({ files: [readyFile("a")] }), []);
+  assert.equal(ready.ready, true);
+  assert.equal(ready.version, "1.2.3");
+  assert.equal(ready.conflictVersion, "1.2.3");
+  assert.equal(ready.target.status, "create");
+
+  const inspecting = buildUploadPlan(makeUpload({ files: [file("a")] }), []);
+  assert.equal(inspecting.ready, false);
+
+  const broken = buildUploadPlan(
+    makeUpload({ files: [file("bad", { status: "error", error: "hỏng" })] }),
+    [],
+  );
+  assert.equal(broken.ready, false);
+});
+
+test("buildUploadPlan omits an unresolved version but keeps the fallback conflict name", () => {
+  const file = readyFile("a", { metadata: metadata({ versionName: null, versionCode: 7 }) });
+  const plan = buildUploadPlan(makeUpload({ files: [file] }), []);
+  assert.equal(plan.version, null);
+  assert.equal(plan.conflictVersion, "7");
+});
+
+test("buildUploadPlan keeps the normalized version name", () => {
+  const file = readyFile("a", { metadata: metadata({ versionName: "1.0.0 (beta)+1" }) });
+  const plan = buildUploadPlan(makeUpload({ files: [file] }), []);
+  assert.equal(plan.version, "1.0.0 (beta)+1");
+});
+
+test("refreshUploadValidation fills consistency and target", () => {
+  const catalog = [{ id: "example", name: "Example", packageName: "com.example.app" }];
+  const upload = makeUpload({ files: [readyFile("a")] });
+  const result = refreshUploadValidation(upload, catalog);
   assert.equal(upload.consistency, result);
   assert.equal(upload.inspecting, false);
-  assert.deepEqual(upload.allowMismatch, ["version"]);
-  assert.match(upload.packageWarning, /com\.example\.app/);
+  assert.equal(upload.target.status, "existing");
+  assert.equal(upload.target.appId, "example");
 });
 
-/* -------------------------------------------------------------- app match */
-
-test("matchAppByPackage finds the owning app", () => {
-  const catalog = [
-    { id: "one", packageName: "com.one" },
-    { id: "two", packageName: "com.two" },
-  ];
-  assert.equal(matchAppByPackage(catalog, "com.two")?.id, "two");
-  assert.equal(matchAppByPackage(catalog, "com.missing"), null);
-  assert.equal(matchAppByPackage(catalog, ""), null);
-});
-
-test("selectAppForPackage auto-selects only when the modal is not pinned", () => {
-  const catalog = [{ id: "two", packageName: "com.example.app" }];
-  const auto = makeUpload({ appId: "one", files: [readyFile("a")] });
-  const selection = selectAppForPackage(auto, catalog);
-  assert.equal(selection.app.id, "two");
-  assert.equal(auto.appId, "two");
-
-  const pinned = makeUpload({ appId: "one", explicitApp: true, files: [readyFile("a")] });
-  assert.equal(selectAppForPackage(pinned, catalog), null);
-  assert.equal(pinned.appId, "one");
-
-  const touched = makeUpload({ appId: "one", appTouched: true, files: [readyFile("a")] });
-  assert.equal(selectAppForPackage(touched, catalog), null);
-  assert.equal(touched.appId, "one");
-
-  const missing = makeUpload({ appId: "one", files: [readyFile("a")] });
-  const none = selectAppForPackage(missing, [{ id: "x", packageName: "com.other" }]);
-  assert.equal(none.app, null);
-  assert.equal(none.packageName, "com.example.app");
+test("refreshUploadValidation blocks a detail-page package mismatch", () => {
+  const catalog = [{ id: "other", name: "Other", packageName: "com.other.app" }];
+  const upload = makeUpload({ expectedAppId: "other", files: [readyFile("a")] });
+  const result = refreshUploadValidation(upload, catalog, "other");
+  assert.equal(upload.target.status, "blocked");
+  assert.ok(codes(result.fatal).includes("detail_package_mismatch"));
 });

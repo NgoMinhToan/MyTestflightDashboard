@@ -31,6 +31,9 @@ export function normalizeApp(summary, adminVersions, api, revision) {
     id: String(summary?.id || ""),
     name: summary?.name || summary?.id || "",
     packageName: summary?.packageName || summary?.id || "",
+    // undefined = older server without the explicit flag; preserve all three
+    // states so `isPlaceholderApp` can fall back only when it is unknown.
+    packageBound: summary?.packageBound,
     description: summary?.description || "",
     developer: summary?.developer || "",
     iconPath: summary?.iconPath || null,
