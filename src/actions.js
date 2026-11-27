@@ -35,14 +35,12 @@ import {
   openVersionForm,
   removeUploadFile,
   updateIconPreview,
-  updateUploadAlertsDOM,
   updateUploadProgressDOM,
-  validateVersionName,
 } from "./modals.js";
 import {
-  computeAllowMismatch,
-  refreshUploadValidation,
-  validateUploadFiles,
+  buildUploadPlan,
+  computeVersionConflicts,
+  effectiveVersionName,
 } from "./upload-plan.js";
 import { renderSettingsStats } from "./views/settings.js";
 import { renderListResults } from "./views/list.js";
@@ -56,14 +54,6 @@ function rerenderModal() {
 }
 
 function syncUploadForm(upload) {
-  const app = document.getElementById("upApp");
-  if (app) upload.appId = app.value;
-  const versionName = document.getElementById("upVersion");
-  if (versionName) upload.versionName = versionName.value;
-  const versionCode = document.getElementById("upCode");
-  if (versionCode) upload.versionCode = versionCode.value;
-  const minSdk = document.getElementById("upMinSdk");
-  if (minSdk) upload.minSdk = minSdk.value;
   const date = document.getElementById("upDate");
   if (date) upload.date = date.value;
   const notes = document.getElementById("upNotes");
@@ -314,51 +304,12 @@ async function startUpload() {
   const upload = modal.upload;
   syncUploadForm(upload);
 
-  const app = findApp(state.catalog, upload.appId);
-  const versionName = upload.versionName.trim();
-  const versionCode = Number.parseInt(upload.versionCode, 10);
-  const minSdk = upload.minSdk.trim() === "" ? null : Number.parseInt(upload.minSdk, 10);
-
   upload.error = "";
-  if (!app) {
-    upload.error = "Chọn một ứng dụng.";
-    rerenderModal();
-    return;
-  }
-  if (upload.files.some((file) => file.status === "inspecting") || upload.inspecting) {
+  if (
+    upload.files.some((file) => file.status === "inspecting") ||
+    upload.inspecting
+  ) {
     upload.error = "Đang đọc metadata APK. Chờ đọc xong rồi thử lại.";
-    rerenderModal();
-    return;
-  }
-
-  const validation = validateUploadFiles(upload, app);
-  upload.consistency = validation;
-  upload.inspecting = validation.inspecting;
-  upload.allowMismatch = computeAllowMismatch(upload);
-  if (validation.fatal.length) {
-    upload.error = validation.fatal.map((item) => item.message).join(" ");
-    rerenderModal();
-    return;
-  }
-
-  if (!validateVersionName(versionName)) {
-    upload.error =
-      "versionName không hợp lệ. Dùng chữ, số, dấu chấm, gạch; bắt đầu bằng chữ hoặc số.";
-    rerenderModal();
-    return;
-  }
-  if (!Number.isInteger(versionCode) || versionCode <= 0) {
-    upload.error = "Version code phải là số nguyên dương.";
-    rerenderModal();
-    return;
-  }
-  if (minSdk !== null && (!Number.isInteger(minSdk) || minSdk <= 0)) {
-    upload.error = "minSdk phải là số nguyên dương hoặc để trống.";
-    rerenderModal();
-    return;
-  }
-  if (!upload.files.length) {
-    upload.error = "Thả ít nhất một tệp APK.";
     rerenderModal();
     return;
   }
@@ -368,33 +319,52 @@ async function startUpload() {
     return;
   }
 
-  let existing = null;
-  try {
-    existing = await state.api.getVersion(app.id, versionName);
-  } catch (error) {
-    if (!(error instanceof ApiError && error.status === 404)) {
-      if (!handleAuthError(error)) {
-        upload.error = errorMessage(error);
-        rerenderModal();
-      }
-      return;
-    }
-    existing = null;
-  }
-
-  const hasArtifacts = Boolean(existing?.artifacts?.length);
-  if (hasArtifacts && !upload.allowReplace) {
-    upload.error = `Phiên bản ${versionName} đã có APK. Chọn tên khác nếu muốn phát hành bản mới.`;
+  const plan = buildUploadPlan(upload, state.catalog, upload.expectedAppId);
+  upload.consistency = plan;
+  upload.target = plan.target;
+  if (!plan.ready) {
+    upload.error = plan.fatal.map((item) => item.message).join(" ");
     rerenderModal();
     return;
   }
-  upload.allowReplace = upload.allowReplace || hasArtifacts;
 
-  const allowMismatch = upload.allowMismatch;
+  const metadata = plan.detected;
+  const notes = upload.notes.trim();
+  const publishedAt = isoFromDateInput(upload.date);
+  const target = plan.target;
+
+  // One inline confirmation covers every ABI that already exists. Adding a new
+  // ABI to an existing version does not ask.
+  if (!upload.allowReplace && target.status === "existing" && plan.conflictVersion) {
+    let existing = null;
+    try {
+      existing = await state.api.getVersion(target.appId, plan.conflictVersion);
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 404)) {
+        if (!handleAuthError(error)) {
+          upload.error = errorMessage(error);
+          rerenderModal();
+        }
+        return;
+      }
+    }
+    const conflicts = computeVersionConflicts(existing, upload.files);
+    if (conflicts.conflict) {
+      upload.pendingReplace = {
+        version: plan.conflictVersion,
+        replacedAbis: conflicts.replacedAbis,
+      };
+      rerenderModal();
+      return;
+    }
+  }
+
+  upload.pendingReplace = null;
   upload.running = true;
   upload.done = false;
   upload.progress = 0;
   upload.error = "";
+  upload.iconWarning = "";
   upload.files.forEach((file) => {
     file.progress = 0;
     file.sha256 = null;
@@ -402,45 +372,32 @@ async function startUpload() {
   });
   rerenderModal();
 
-  const notes = upload.notes.trim();
-  const publishedAt = isoFromDateInput(upload.date);
-
   try {
-    if (!existing) {
-      const input = { versionName, versionCode };
-      if (minSdk !== null) input.minSdk = minSdk;
-      if (notes) input.releaseNotes = notes;
-      if (publishedAt) input.publishedAt = publishedAt;
-      await state.api.createVersion(app.id, input);
-    } else {
-      await state.api.updateVersion(app.id, versionName, {
-        versionCode,
-        minSdk,
-        releaseNotes: notes || null,
-        publishedAt,
-      });
-    }
-
+    let appId = target.status === "existing" ? target.appId : null;
     for (const file of upload.files) {
+      const params = {};
+      if (appId) params.appId = appId;
+      else params.create = true;
+      if (!appId && target.name) params.name = target.name;
+      if (plan.version) params.version = plan.version;
+      if (file === upload.files[0]) {
+        if (notes) params.releaseNotes = notes;
+        if (publishedAt) params.publishedAt = publishedAt;
+      }
       try {
-        const result = await state.api.uploadArtifact(
-          app.id,
-          versionName,
-          file.abi,
-          file.file,
-          {
-            allowMismatch,
-            onProgress: (value) => {
-              file.progress = value;
-              updateUploadProgressDOM(state);
-            },
+        const result = await state.api.importApk(file.file, params, {
+          onProgress: (value) => {
+            file.progress = value;
+            updateUploadProgressDOM(state);
           },
-        );
+        });
+        const resultAppId = result?.app?.id;
+        if (!appId && resultAppId) {
+          appId = resultAppId;
+          upload.appId = resultAppId;
+        }
         file.progress = 1;
-        const artifact = result?.version?.artifacts?.find(
-          (candidate) => candidate.abi === file.abi,
-        );
-        if (artifact?.sha256) file.sha256 = artifact.sha256;
+        if (result?.artifact?.sha256) file.sha256 = result.artifact.sha256;
         updateUploadProgressDOM(state);
       } catch (error) {
         file.uploadError = uploadErrorMessage(error);
@@ -448,17 +405,56 @@ async function startUpload() {
       }
     }
 
+    // Adaptive/vector launcher icons are rendered in the browser. Only write
+    // when the app had no effective icon before this upload; never overwrite.
+    const descriptor = metadata?.icon;
+    const iconPreview = upload.files.find(
+      (file) => file.iconPreview?.pngBlob && file.metadata?.icon,
+    )?.iconPreview;
+    const hadIcon = Boolean(target.app?.iconUrl);
+    if (
+      appId &&
+      !hadIcon &&
+      descriptor &&
+      descriptor.kind !== "raster" &&
+      iconPreview?.pngBlob
+    ) {
+      try {
+        await state.api.putIcon(appId, iconPreview.pngBlob, { ifMissing: true });
+      } catch (error) {
+        upload.iconWarning = `Đã phát hành nhưng chưa ghi được icon: ${errorMessage(error)}`;
+      }
+    }
+
     upload.running = false;
     upload.done = true;
     upload.progress = 1;
     await refreshCatalog({ silent: true });
-    toast(`Đã phát hành ${app.name} v${versionName}.`);
+    const appName =
+      findApp(state.catalog, appId)?.name || target.name || appId || "ứng dụng";
+    const versionLabel =
+      plan.version || effectiveVersionName(metadata) || "";
+    toast(
+      versionLabel
+        ? `Đã phát hành ${appName} v${versionLabel}.`
+        : `Đã phát hành ${appName}.`,
+    );
+    rerenderModal();
   } catch (error) {
     upload.running = false;
     upload.error = uploadErrorMessage(error);
     rerenderModal();
     handleAuthError(error);
   }
+}
+
+function confirmReplace() {
+  const upload = state.modal?.upload;
+  if (!upload?.pendingReplace) return;
+  upload.allowReplace = true;
+  upload.pendingReplace = null;
+  rerenderModal();
+  void startUpload();
 }
 
 function uploadErrorMessage(error) {
@@ -736,11 +732,11 @@ export function handleClick(event) {
     return;
   }
   if (act === "upload") {
-    const appId = element.dataset.app || null;
-    if (openUpload(state, appId, element.dataset.version || null)) {
+    const expectedAppId = element.dataset.app || null;
+    if (openUpload(state, { expectedAppId })) {
       rerenderModal();
     } else {
-      toast("Tạo ứng dụng trước, rồi đẩy APK lên.", "error");
+      toast("Không còn ứng dụng này.", "error");
     }
     return;
   }
@@ -843,9 +839,17 @@ export function handleClick(event) {
     void startUpload();
     return;
   }
+  if (act === "confirmReplace") {
+    confirmReplace();
+    return;
+  }
   if (act === "goUploadVersion") {
     const upload = state.modal?.upload;
-    const appId = upload?.appId;
+    const appId =
+      upload?.appId ||
+      upload?.target?.appId ||
+      upload?.target?.app?.id ||
+      upload?.expectedAppId;
     closeModal(state, true);
     rerenderModal();
     if (appId) go(`/apps/${encodeURIComponent(appId)}`);
@@ -905,25 +909,11 @@ export function handleInput(event) {
   }
   const upload = state.modal?.upload;
   if (!upload) return;
-  if (target.id === "upVersion") {
-    upload.versionName = target.value;
-    upload.touched.versionName = true;
-  } else if (target.id === "upCode") {
-    upload.versionCode = target.value;
-    upload.touched.versionCode = true;
-  } else if (target.id === "upMinSdk") {
-    upload.minSdk = target.value;
-    upload.touched.minSdk = true;
-  } else if (target.id === "upDate") {
+  if (target.id === "upDate") {
     upload.date = target.value;
-    return;
   } else if (target.id === "upNotes") {
     upload.notes = target.value;
-    return;
-  } else {
-    return;
   }
-  updateUploadAlertsDOM(state);
 }
 
 export function handleChange(event) {
@@ -948,29 +938,6 @@ export function handleChange(event) {
   if (target.id === "iconInput") {
     if (target.files?.[0]) readIconFile(target.files[0]);
     return;
-  }
-  const upload = state.modal?.upload;
-  if (!upload) return;
-  if (target.id === "upApp") {
-    upload.appId = target.value;
-    upload.appTouched = true;
-    upload.packageHint = "";
-    refreshUploadValidation(upload, findApp(state.catalog, upload.appId));
-    rerenderModal();
-    return;
-  }
-  if (target.dataset.act === "fileAbi") {
-    const file = upload.files.find((candidate) => candidate.id === target.dataset.file);
-    if (!file) return;
-    file.abi = target.value;
-    // Do not silently drop another file: the validation block explains the
-    // duplicate ABI so the user can decide which APK to keep.
-    file.abiOverridden = file.metadata
-      ? file.abi !== file.metadata.artifactAbi
-      : true;
-    upload.error = "";
-    refreshUploadValidation(upload, findApp(state.catalog, upload.appId));
-    rerenderModal();
   }
 }
 

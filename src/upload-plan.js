@@ -1,33 +1,65 @@
 /**
- * Pure upload-modal state helpers.
+ * Pure upload-plan helpers.
  *
- * No DOM and no API access, so `node --test` can cover the prefill rules,
- * cross-file consistency checks and ABI overrides without a browser.
+ * The APK is the only source of truth: there is no app selector, no editable
+ * version/ABI, and no `allow_mismatch` from the dashboard. This module binds a
+ * package to an existing catalog app (or plans an auto-created one), validates
+ * a multi-APK selection, and computes which ABIs an import would replace.
+ *
+ * No DOM and no API access so `node --test` covers every rule without a
+ * browser.
  */
 
-export const ALLOW_MISMATCH_ORDER = ["package", "version", "sdk", "abi"];
+/** Placeholder apps use their id as the package (legacy/manual apps). */
+export function isPlaceholderApp(app) {
+  if (!app) return true;
+  const packageName = String(app.packageName || "");
+  return packageName === "" || packageName === app.id;
+}
+
+/** Deterministic, path-safe app id derived from a package name. */
+export function appIdFromPackage(packageName) {
+  const text = String(packageName ?? "")
+    .trim()
+    .toLowerCase();
+  if (!text) return "";
+  let id = text
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[-._]+/, "")
+    .replace(/[-._]+$/, "");
+  if (!id) id = "app";
+  if (!/^[a-z0-9]/.test(id)) id = `app-${id}`;
+  return id.slice(0, 64).replace(/[-._]+$/, "") || "app";
+}
+
+export function humanizePackage(packageName) {
+  const last = String(packageName || "")
+    .split(".")
+    .findLast(Boolean);
+  if (!last) return String(packageName || "Ứng dụng");
+  return last
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/(^|\s)\S/g, (match) => match.toUpperCase());
+}
+
+/** Server contract: missing versionName falls back to `String(versionCode)`. */
+export function effectiveVersionName(metadata) {
+  if (!metadata) return null;
+  const name = typeof metadata.versionName === "string" ? metadata.versionName : "";
+  if (name.trim() !== "") return name;
+  if (Number.isInteger(metadata.versionCode)) return String(metadata.versionCode);
+  return null;
+}
+
+export function effectiveAbi(file) {
+  return file?.metadata?.artifactAbi || file?.abi || "universal";
+}
 
 function findFile(upload, fileId) {
   if (!upload || !Array.isArray(upload.files)) return null;
   return upload.files.find((file) => file.id === fileId) || null;
-}
-
-/** Accepts the object used by the modal or a Set for callers that prefer it. */
-export function isFieldTouched(touched, field) {
-  if (!touched) return false;
-  if (typeof touched.has === "function") return touched.has(field);
-  return Boolean(touched[field]);
-}
-
-function parsePositiveInt(value) {
-  const text = String(value ?? "").trim();
-  if (!/^\d+$/.test(text)) return null;
-  const parsed = Number.parseInt(text, 10);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-function distinct(values) {
-  return [...new Set(values)];
 }
 
 export function firstInspectedMetadata(upload) {
@@ -37,20 +69,18 @@ export function firstInspectedMetadata(upload) {
   return file?.metadata || null;
 }
 
-/**
- * Store a successful inspection. Metadata always wins over the filename
- * guess; only an explicit user choice (`abiOverridden`) is preserved.
- */
+/** Store a successful inspection. Metadata always wins over the name guess. */
 export function applyInspection(upload, fileId, result) {
   const file = findFile(upload, fileId);
   if (!file || !result) return null;
   file.metadata = result;
   file.detectedAbi = result.artifactAbi;
+  file.abi = result.artifactAbi;
   file.status = "ready";
   file.error = "";
   file.errorCode = "";
   file.previewUnavailable = false;
-  if (!file.abiOverridden) file.abi = result.artifactAbi;
+  file.previewMessage = "";
   return file;
 }
 
@@ -69,8 +99,7 @@ export function applyInspectionError(upload, fileId, error) {
     file.error = "";
     file.errorCode = code;
     file.previewUnavailable = true;
-    file.previewMessage =
-      error?.message || "Trình duyệt không xem trước được APK này.";
+    file.previewMessage = error?.message || "Trình duyệt không xem trước được APK này.";
     return file;
   }
   file.status = "error";
@@ -80,124 +109,120 @@ export function applyInspectionError(upload, fileId, error) {
   return file;
 }
 
-/**
- * Fill versionName/versionCode/minSdk from the first inspected APK.
- * Never touches a field the user edited, and never touches a modal opened for
- * an existing version (there the version identity is already fixed).
- */
-export function applyPrefill(upload, touched = upload?.touched) {
-  const applied = { versionName: false, versionCode: false, minSdk: false };
-  if (!upload || upload.existingVersion) return applied;
-  const metadata = firstInspectedMetadata(upload);
-  if (!metadata) return applied;
-
-  if (
-    !isFieldTouched(touched, "versionName") &&
-    metadata.versionName != null &&
-    upload.versionName !== metadata.versionName
-  ) {
-    upload.versionName = metadata.versionName;
-    applied.versionName = true;
-  }
-  if (!isFieldTouched(touched, "versionCode") && metadata.versionCode != null) {
-    const next = String(metadata.versionCode);
-    if (upload.versionCode !== next) {
-      upload.versionCode = next;
-      applied.versionCode = true;
-    }
-  }
-  if (
-    !isFieldTouched(touched, "minSdk") &&
-    metadata.minSdk != null &&
-    upload.minSdk !== String(metadata.minSdk)
-  ) {
-    upload.minSdk = String(metadata.minSdk);
-    applied.minSdk = true;
-  }
-  return applied;
-}
-
-function versionFieldTouched(upload) {
-  return (
-    isFieldTouched(upload?.touched, "versionName") ||
-    isFieldTouched(upload?.touched, "versionCode")
-  );
-}
-
-function formVersionDiffers(upload, metadata) {
-  if (!metadata) return false;
-  const formCode = parsePositiveInt(upload?.versionCode);
-  const codeDiff =
-    formCode != null &&
-    metadata.versionCode != null &&
-    formCode !== metadata.versionCode;
-  const formName = String(upload?.versionName ?? "").trim();
-  const nameDiff =
-    metadata.versionName != null &&
-    formName !== "" &&
-    formName !== metadata.versionName;
-  return codeDiff || nameDiff;
-}
-
-function formSdkDiffers(upload, metadata) {
-  if (metadata?.minSdk == null) return false;
-  const formMin = parsePositiveInt(upload?.minSdk);
-  return formMin != null && formMin !== metadata.minSdk;
-}
-
-/**
- * Which `allow_mismatch` values the upload needs because the user deliberately
- * diverged from what the APK declares. Package mismatches are not auto-allowed:
- * the server's 422 is shown instead.
- */
-export function computeAllowMismatch(upload) {
-  if (!upload) return [];
-  const metadata = firstInspectedMetadata(upload);
-  const selected = new Set();
-  if (metadata) {
-    if (versionFieldTouched(upload) && formVersionDiffers(upload, metadata)) {
-      selected.add("version");
-    }
-    if (
-      isFieldTouched(upload.touched, "minSdk") &&
-      formSdkDiffers(upload, metadata)
-    ) {
-      selected.add("sdk");
-    }
-  }
-  for (const file of upload.files || []) {
-    if (!file.metadata || file.status === "error") {
-      // Without metadata there is no detected ABI, but an explicit select
-      // change is still the user's declaration and needs the server's consent.
-      if (file.status !== "error" && file.previewUnavailable && file.abiOverridden) {
-        selected.add("abi");
-      }
-      continue;
-    }
-    if (file.abi !== file.metadata.artifactAbi) selected.add("abi");
-  }
-  return ALLOW_MISMATCH_ORDER.filter((kind) => selected.has(kind));
-}
-
-/** Find the catalog app that owns the inspected package. */
-export function matchAppByPackage(catalog, packageName) {
-  if (!packageName) return null;
-  return (
-    (catalog || []).find((app) => app && app.packageName === packageName) || null
+export function matchAppsByPackage(catalog, packageName) {
+  if (!packageName) return [];
+  return (catalog || []).filter(
+    (app) => app && app.packageName === packageName,
   );
 }
 
 /**
- * Auto-select the catalog app for the inspected package unless the modal was
- * opened for a specific app or the user already changed the select.
+ * Resolve which app this upload belongs to.
+ *
+ * Global upload (no `expectedAppId`): the unique catalog app owning the
+ * package, otherwise a planned auto-create. Detail upload: the opened app;
+ * a real package mismatch is fatal, a placeholder may bind on this upload.
  */
-export function selectAppForPackage(upload, catalog) {
-  if (!upload || upload.explicitApp || upload.appTouched) return null;
+export function resolveUploadTarget(upload, catalog = [], expectedAppId = null) {
   const metadata = firstInspectedMetadata(upload);
-  if (!metadata) return null;
-  const match = matchAppByPackage(catalog, metadata.packageName);
-  if (match) upload.appId = match.id;
-  return { packageName: metadata.packageName, app: match };
+  const packageName = metadata?.packageName || null;
+  const warnings = [];
+  const fatal = [];
+  const result = {
+    status: "unknown",
+    app: null,
+    appId: null,
+    name: null,
+    packageName,
+    create: false,
+    idHint: null,
+    fatal,
+    warnings,
+  };
+
+  if (expectedAppId) {
+    const app = (catalog || []).find((candidate) => candidate.id === expectedAppId);
+    if (!app) {
+      fatal.push({
+        code: "app_not_found",
+        message: `Không còn ứng dụng ${expectedAppId} trong danh mục.`,
+      });
+      result.status = "blocked";
+      return result;
+    }
+    result.app = app;
+    result.appId = app.id;
+    result.name = app.name;
+    if (packageName && !isPlaceholderApp(app) && app.packageName !== packageName) {
+      fatal.push({
+        code: "detail_package_mismatch",
+        message: `APK thuộc ${packageName}, không khớp package ${app.packageName} của ứng dụng đang mở.`,
+      });
+      result.status = "blocked";
+      return result;
+    }
+    result.status = "existing";
+    result.create = false;
+    if (packageName && isPlaceholderApp(app)) {
+      warnings.push({
+        code: "package_bind",
+        message: `Package ${packageName} sẽ được gắn vào ${app.name} ở lần tải này.`,
+      });
+    }
+    return result;
+  }
+
+  if (!packageName) {
+    // The browser could not read the manifest; the server derives the app.
+    result.status = "unknown";
+    result.create = true;
+    return result;
+  }
+
+  const matches = matchAppsByPackage(catalog, packageName);
+  if (matches.length > 1) {
+    fatal.push({
+      code: "duplicate_package",
+      message: `Có ${matches.length} ứng dụng cùng package ${packageName}: ${matches
+        .map((app) => app.id)
+        .join(", ")}.`,
+    });
+    result.status = "blocked";
+    return result;
+  }
+  if (matches.length === 1) {
+    result.status = "existing";
+    result.app = matches[0];
+    result.appId = matches[0].id;
+    result.name = matches[0].name;
+    result.create = false;
+    return result;
+  }
+
+  const idHint = appIdFromPackage(packageName);
+  const collision = (catalog || []).find((app) => app.id === idHint);
+  if (collision) {
+    fatal.push({
+      code: "app_id_conflict",
+      message: `App ID ${idHint} đã được dùng bởi ${collision.name}.`,
+    });
+    result.status = "blocked";
+    result.idHint = idHint;
+    return result;
+  }
+  result.status = "create";
+  result.create = true;
+  result.idHint = idHint;
+  result.name = metadata.label || humanizePackage(packageName);
+  result.warnings.push({
+    code: "auto_create",
+    message: `Ứng dụng ${result.name} sẽ được tạo từ APK.`,
+  });
+  return result;
+}
+
+function distinct(values) {
+  return [...new Set(values)];
 }
 
 function collectFileIssues(files, fatal, warnings) {
@@ -214,15 +239,8 @@ function collectFileIssues(files, fatal, warnings) {
       warnings.push({
         code: "preview_unavailable",
         fileId: file.id,
-        message: `${file.name}: ${file.previewMessage || "không xem trước được trong trình duyệt này."} ABI đang lấy từ tên tệp.`,
+        message: `${file.name}: ${file.previewMessage || "không xem trước được trong trình duyệt này."} Máy chủ sẽ xác minh.`,
       });
-      if (file.abiOverridden) {
-        warnings.push({
-          code: "abi_override",
-          fileId: file.id,
-          message: `${file.name}: ABI ${file.abi} được chọn tay vì không xem trước được APK.`,
-        });
-      }
     }
     if (file.metadata?.configSplit) {
       const split = file.metadata.split ? ` (${file.metadata.split})` : "";
@@ -238,11 +256,12 @@ function collectFileIssues(files, fatal, warnings) {
 function collectDuplicateAbi(files, fatal) {
   const abiFiles = new Map();
   for (const file of files) {
-    // An inspecting file only has the filename guess; wait for metadata.
-    if (file.status !== "ready" || !file.abi) continue;
-    const bucket = abiFiles.get(file.abi) || [];
+    if (file.status !== "ready") continue;
+    const abi = effectiveAbi(file);
+    if (!abi) continue;
+    const bucket = abiFiles.get(abi) || [];
     bucket.push(file);
-    abiFiles.set(file.abi, bucket);
+    abiFiles.set(abi, bucket);
   }
   for (const [abi, bucket] of abiFiles) {
     if (bucket.length > 1) {
@@ -256,9 +275,7 @@ function collectDuplicateAbi(files, fatal) {
 }
 
 function collectConsistency(files, fatal) {
-  const inspected = files.filter(
-    (file) => file.status === "ready" && file.metadata,
-  );
+  const inspected = files.filter((file) => file.status === "ready" && file.metadata);
   const packages = distinct(inspected.map((file) => file.metadata.packageName));
   if (packages.length > 1) {
     fatal.push({
@@ -286,6 +303,15 @@ function collectConsistency(files, fatal) {
       message: `Các tệp có versionName khác nhau: ${names.join(", ")}.`,
     });
   }
+  const sdks = distinct(
+    inspected.map((file) => file.metadata.minSdk).filter((value) => value != null),
+  );
+  if (sdks.length > 1) {
+    fatal.push({
+      code: "sdk_mismatch",
+      message: `Các tệp có minSdk khác nhau: ${sdks.join(", ")}.`,
+    });
+  }
   return { inspected, packages };
 }
 
@@ -305,68 +331,6 @@ function collectFlagWarnings(inspected, warnings) {
         message: `${file.name} được đánh dấu testOnly.`,
       });
     }
-    if (file.abi !== file.metadata.artifactAbi) {
-      warnings.push({
-        code: "abi_override",
-        fileId: file.id,
-        message: `${file.name}: ABI chọn tay ${file.abi} khác APK (${file.metadata.artifactAbi}).`,
-      });
-    }
-  }
-}
-
-function collectAppPackageWarnings(packages, app, warnings) {
-  const appPackage =
-    app?.packageName && app.packageName !== app.id ? app.packageName : "";
-  if (!appPackage) return;
-  for (const packageName of packages) {
-    if (packageName !== appPackage) {
-      warnings.push({
-        code: "app_package_mismatch",
-        message: `Package APK ${packageName} khác package ứng dụng ${appPackage}.`,
-      });
-    }
-  }
-}
-
-function collectFormWarnings(upload, detected, warnings) {
-  if (!detected) return;
-  const versionTouched = versionFieldTouched(upload);
-  if (versionTouched && formVersionDiffers(upload, detected)) {
-    warnings.push({
-      code: "version_override",
-      message:
-        "Version trong form khác APK; máy chủ sẽ kiểm tra và cần allow_mismatch=version.",
-    });
-  } else if (
-    !versionTouched &&
-    upload?.existingVersion &&
-    formVersionDiffers(upload, detected)
-  ) {
-    warnings.push({
-      code: "existing_version_mismatch",
-      message:
-        "Version của phiên bản đang mở khác APK; máy chủ sẽ từ chối (422). Sửa form hoặc chọn APK khác.",
-    });
-  }
-
-  const sdkTouched = isFieldTouched(upload?.touched, "minSdk");
-  if (sdkTouched && formSdkDiffers(upload, detected)) {
-    warnings.push({
-      code: "sdk_override",
-      message:
-        "minSdk trong form khác APK; máy chủ sẽ kiểm tra và cần allow_mismatch=sdk.",
-    });
-  } else if (
-    !sdkTouched &&
-    upload?.existingVersion &&
-    formSdkDiffers(upload, detected)
-  ) {
-    warnings.push({
-      code: "existing_sdk_mismatch",
-      message:
-        "minSdk của phiên bản đang mở khác APK; máy chủ sẽ từ chối (422). Sửa minSdk hoặc chọn APK khác.",
-    });
   }
 }
 
@@ -376,9 +340,10 @@ function collectFormWarnings(upload, detected, warnings) {
  *   warnings: Array<{ code: string, message: string, fileId?: string }>,
  *   inspecting: boolean,
  *   detected: object | null,
+ *   target: object,
  * }}
  */
-export function validateUploadFiles(upload, app = null) {
+export function validateUploadFiles(upload, catalog = [], expectedAppId = null) {
   const fatal = [];
   const warnings = [];
   const files = Array.isArray(upload?.files) ? upload.files : [];
@@ -387,26 +352,75 @@ export function validateUploadFiles(upload, app = null) {
   collectDuplicateAbi(files, fatal);
   const { inspected, packages } = collectConsistency(files, fatal);
   collectFlagWarnings(inspected, warnings);
-  collectAppPackageWarnings(packages, app, warnings);
-  const detected = inspected[0]?.metadata || null;
-  collectFormWarnings(upload, detected, warnings);
-  return { fatal, warnings, inspecting, detected };
+  const target = resolveUploadTarget(upload, catalog, expectedAppId);
+  fatal.push(...target.fatal);
+  if (!files.length) {
+    fatal.push({ code: "no_files", message: "Thả ít nhất một tệp APK." });
+  }
+  if (
+    (target.status === "create" && packages.length > 0) ||
+    (target.status === "existing" && target.warnings.length)
+  ) {
+    warnings.push(...target.warnings);
+  }
+  return {
+    fatal,
+    warnings,
+    inspecting,
+    detected: inspected[0]?.metadata || null,
+    target,
+  };
 }
 
-/**
- * Recompute the derived modal fields after files or form fields change.
- * Mutates only presentation/validation state, never the API payload.
- */
-export function refreshUploadValidation(upload, app = null) {
-  const result = validateUploadFiles(upload, app);
+/** Recompute derived modal fields after files change. Mutates presentation only. */
+export function refreshUploadValidation(upload, catalog = [], expectedAppId = null) {
+  const result = validateUploadFiles(upload, catalog, expectedAppId);
   if (upload) {
     upload.consistency = result;
     upload.inspecting = result.inspecting;
-    upload.allowMismatch = computeAllowMismatch(upload);
-    upload.packageWarning = result.warnings
-      .filter((warning) => warning.code === "app_package_mismatch")
-      .map((warning) => warning.message)
-      .join(" ");
+    upload.target = result.target;
+    upload.packageWarning = "";
   }
   return result;
+}
+
+/**
+ * Which artifacts an import would replace. Adding a new ABI never conflicts.
+ */
+export function computeVersionConflicts(existingVersion, files) {
+  const existingAbis = new Set(
+    (existingVersion?.artifacts || []).map((artifact) => artifact.abi),
+  );
+  const replacedAbis = [];
+  const newAbis = [];
+  for (const file of files || []) {
+    const abi = effectiveAbi(file);
+    if (!abi) continue;
+    if (existingAbis.has(abi)) {
+      if (!replacedAbis.includes(abi)) replacedAbis.push(abi);
+    } else if (!newAbis.includes(abi)) {
+      newAbis.push(abi);
+    }
+  }
+  return { replacedAbis, newAbis, conflict: replacedAbis.length > 0 };
+}
+
+/**
+ * Final plan for the import. `version` is the value to send to the server
+ * (only when the APK resolved it); `conflictVersion` is the name the server
+ * would use, so the dashboard can query an existing version first.
+ */
+export function buildUploadPlan(upload, catalog = [], expectedAppId = null) {
+  const validation = validateUploadFiles(upload, catalog, expectedAppId);
+  const detected = validation.detected;
+  return {
+    ...validation,
+    ready:
+      validation.fatal.length === 0 &&
+      !validation.inspecting &&
+      (upload?.files?.length || 0) > 0,
+    version: detected?.versionName?.trim() ? detected.versionName : null,
+    conflictVersion: effectiveVersionName(detected),
+    detected,
+  };
 }

@@ -1,30 +1,25 @@
 import {
   ABI_META,
   ABI_ORDER,
-  ID_PATTERN,
   esc,
   fmtSize,
   inferAbi,
   initialOf,
   shortSha,
-  sortedVersions,
-  suggestVersion,
   toDateInput,
   todayDateInput,
 } from "./format.js";
 import { svg } from "./icons.js";
 import { inspectApk } from "./apk-inspect.js";
+import { describeIcon, prepareIconPreview, releaseIconPreview } from "./icon-render.js";
 import {
   applyInspection,
   applyInspectionError,
-  applyPrefill,
+  effectiveVersionName,
+  firstInspectedMetadata,
   refreshUploadValidation,
-  selectAppForPackage,
+  resolveUploadTarget,
 } from "./upload-plan.js";
-
-const ABI_OPTIONS = ABI_ORDER.map(
-  (abi) => `<option value="${abi}">${ABI_META[abi].label}</option>`,
-).join("");
 
 function fileId() {
   return `f${Date.now()}${Math.random().toString(16).slice(2, 8)}`;
@@ -45,82 +40,81 @@ function closeButton() {
 
 /* ------------------------------------------------------------------ upload */
 
-function appForUpload(state, upload) {
-  return (
-    state.catalog.find((candidate) => candidate.id === upload?.appId) ||
-    state.catalog[0] ||
-    null
-  );
-}
-
 function emptyConsistency() {
-  return { fatal: [], warnings: [], inspecting: false, detected: null };
+  return {
+    fatal: [],
+    warnings: [],
+    inspecting: false,
+    detected: null,
+    target: resolveUploadTarget(null, [], null),
+  };
 }
 
-export function openUpload(state, appId = null, versionName = null) {
-  const explicitApp = appId != null;
-  const app = explicitApp
-    ? state.catalog.find((candidate) => candidate.id === appId) || null
-    : null;
-  if (explicitApp && !app) return false;
-  const fallbackApp = app || state.catalog[0] || null;
-  if (!fallbackApp) return false;
-  const versions = sortedVersions(fallbackApp.versions);
-  const known = versionName ? versions.find((version) => version.name === versionName) : null;
-  const draft = versionName ? null : versions.find((version) => version.artifacts.length === 0);
-  const top = versions[0];
-  const source = known || draft || null;
+export function openUpload(state, options = null) {
+  const expectedAppId =
+    typeof options === "string" ? options : options?.expectedAppId || null;
+  if (expectedAppId && !state.catalog.some((candidate) => candidate.id === expectedAppId)) {
+    return false;
+  }
   const upload = {
-    appId: fallbackApp.id,
-    explicitApp,
-    appTouched: false,
-    existingVersion: Boolean(versionName),
-    versionName: versionName || draft?.name || suggestVersion(fallbackApp),
-    versionCode: String(source?.code || (top?.code || 0) + 1 || 1),
-    minSdk: String(source?.minSdk ?? top?.minSdk ?? 26),
-    date: source?.publishedAt ? toDateInput(source.publishedAt) : todayDateInput(),
-    notes: source?.notes || "",
+    expectedAppId,
+    date: todayDateInput(),
+    notes: "",
     files: [],
-    touched: { versionName: false, versionCode: false, minSdk: false },
     inspecting: false,
     consistency: emptyConsistency(),
-    packageWarning: "",
-    packageHint: "",
-    allowMismatch: [],
+    target: null,
+    pendingReplace: null,
     running: false,
     done: false,
     error: "",
+    iconWarning: "",
     allowReplace: false,
     progress: 0,
   };
-  refreshUploadValidation(upload, fallbackApp);
+  refreshUploadValidation(upload, state.catalog, expectedAppId);
   state.modal = { type: "upload", upload };
   return true;
+}
+
+function disposeFileIcon(file) {
+  if (file?.iconPreview) releaseIconPreview(file.iconPreview);
+  if (file) file.iconPreview = null;
 }
 
 async function inspectUploadEntry(state, upload, entry, onUpdate) {
   if (state.modal?.upload !== upload || !upload.files.includes(entry)) return;
   try {
     const result = await inspectApk(entry.file);
-    if (state.modal?.upload !== upload) return;
-    if (!upload.files.includes(entry)) return;
+    if (state.modal?.upload !== upload || !upload.files.includes(entry)) return;
     applyInspection(upload, entry.id, result);
   } catch (error) {
-    if (state.modal?.upload !== upload) return;
-    if (!upload.files.includes(entry)) return;
+    if (state.modal?.upload !== upload || !upload.files.includes(entry)) return;
     applyInspectionError(upload, entry.id, error);
   }
-  if (state.modal?.upload !== upload) return;
-  if (!upload.files.includes(entry)) return;
-  applyPrefill(upload);
-  const selection = selectAppForPackage(upload, state.catalog);
-  if (selection) {
-    upload.packageHint = selection.app
-      ? ""
-      : `Chưa có ứng dụng nào có package ${selection.packageName}. Tạo ứng dụng mới trong Thư viện rồi thử lại.`;
-  }
-  refreshUploadValidation(upload, appForUpload(state, upload));
+  if (state.modal?.upload !== upload || !upload.files.includes(entry)) return;
+  refreshUploadValidation(upload, state.catalog, upload.expectedAppId);
   onUpdate?.();
+
+  const descriptor = entry.metadata?.icon;
+  if (descriptor) {
+    entry.iconStatus = "loading";
+    onUpdate?.();
+    const resources = entry.metadata?.resources;
+    const preview = await prepareIconPreview(descriptor, {
+      table: resources?.table || null,
+      readEntry: resources?.readEntry || null,
+      size: 256,
+    });
+    if (state.modal?.upload !== upload || !upload.files.includes(entry)) {
+      releaseIconPreview(preview);
+      return;
+    }
+    disposeFileIcon(entry);
+    entry.iconPreview = preview;
+    entry.iconStatus = preview?.previewUrl ? "ready" : "error";
+    onUpdate?.();
+  }
 }
 
 /**
@@ -165,13 +159,14 @@ export async function addFilesToUpload(state, fileList, { onUpdate } = {}) {
       sizeBytes: file.size,
       abi: inferAbi(file.name),
       detectedAbi: null,
-      abiOverridden: false,
       status: "inspecting",
       metadata: null,
       error: "",
       errorCode: "",
       previewUnavailable: false,
       previewMessage: "",
+      iconPreview: null,
+      iconStatus: "idle",
       progress: 0,
       sha256: null,
     };
@@ -180,7 +175,9 @@ export async function addFilesToUpload(state, fileList, { onUpdate } = {}) {
     added += 1;
   });
   upload.error = "";
-  refreshUploadValidation(upload, appForUpload(state, upload));
+  upload.pendingReplace = null;
+  upload.allowReplace = false;
+  refreshUploadValidation(upload, state.catalog, upload.expectedAppId);
   onUpdate?.();
 
   if (pending.length) {
@@ -188,8 +185,7 @@ export async function addFilesToUpload(state, fileList, { onUpdate } = {}) {
       pending.map((entry) => inspectUploadEntry(state, upload, entry, onUpdate)),
     );
     if (state.modal?.upload === upload) {
-      applyPrefill(upload);
-      refreshUploadValidation(upload, appForUpload(state, upload));
+      refreshUploadValidation(upload, state.catalog, upload.expectedAppId);
       onUpdate?.();
     }
   }
@@ -207,12 +203,28 @@ export async function addFilesToUpload(state, fileList, { onUpdate } = {}) {
 export function removeUploadFile(state, id) {
   const upload = state.modal?.upload;
   if (!upload || upload.running || upload.done) return;
-  upload.files = upload.files.filter((file) => file.id !== id);
-  if (!upload.files.some((file) => file.metadata)) upload.packageHint = "";
-  refreshUploadValidation(upload, appForUpload(state, upload));
+  const file = upload.files.find((candidate) => candidate.id === id);
+  disposeFileIcon(file);
+  upload.files = upload.files.filter((candidate) => candidate.id !== id);
+  upload.pendingReplace = null;
+  upload.allowReplace = false;
+  refreshUploadValidation(upload, state.catalog, upload.expectedAppId);
 }
 
-function filePreviewHTML(file) {
+function fileIconHTML(file) {
+  if (file.iconPreview?.previewUrl) {
+    return `<span class="apkicon"><img src="${esc(file.iconPreview.previewUrl)}" alt=""></span>`;
+  }
+  if (
+    file.iconStatus === "loading" ||
+    (file.status === "ready" && file.metadata?.icon && !file.iconPreview)
+  ) {
+    return `<span class="apkicon loading"><span class="spinner"></span></span>`;
+  }
+  return `<span class="apkicon"><span class="letter">${initialOf({ name: file.name })}</span></span>`;
+}
+
+function fileMetadataHTML(file) {
   if (file.status === "inspecting") {
     return `<div class="apkprev inspecting"><span class="spinner"></span> Đang đọc AndroidManifest.xml…</div>`;
   }
@@ -220,7 +232,7 @@ function filePreviewHTML(file) {
     return `<div class="apkprev bad">${esc(file.error || "Không đọc được APK.")}</div>`;
   }
   if (file.previewUnavailable) {
-    return `<div class="apkprev muted">${esc(file.previewMessage || "Không xem trước được APK trong trình duyệt này.")} ABI đang lấy từ tên tệp; máy chủ sẽ xác minh.</div>`;
+    return `<div class="apkprev muted">${esc(file.previewMessage || "Không xem trước được APK trong trình duyệt này.")} Máy chủ sẽ xác minh.</div>`;
   }
   const metadata = file.metadata;
   if (!metadata) return "";
@@ -236,14 +248,17 @@ function filePreviewHTML(file) {
   const abiDetail = metadata.abis.length > 1 ? ` · ${metadata.abis.join(", ")}` : "";
   const targetLabel =
     metadata.targetSdk != null ? ` · targetSdk ${metadata.targetSdk}` : "";
+  const iconLabel = metadata.icon
+    ? `<span class="det">icon ${esc(file.iconPreview?.label || describeIcon(metadata.icon))}</span>`
+    : "";
   const uploadError = file.uploadError
     ? `<div class="apkprev bad">${esc(file.uploadError)}</div>`
     : "";
   return `
     <div class="apkprev">
       <div class="pkline"><span class="pkg">${esc(metadata.packageName)}</span>${flags}</div>
-      <div class="kvline">v${esc(metadata.versionName ?? "—")} · code ${metadata.versionCode} · minSdk ${metadata.minSdk ?? "—"}${targetLabel}</div>
-      <div class="abiline"><span class="abi ${meta.cls}">${esc(meta.label)}</span><span class="det">ABI từ APK${esc(abiDetail)}</span></div>
+      <div class="kvline">v${esc(effectiveVersionName(metadata) ?? "—")} · code ${metadata.versionCode} · minSdk ${metadata.minSdk ?? "—"}${targetLabel}</div>
+      <div class="abiline"><span class="abi ${meta.cls}">${esc(meta.label)}</span><span class="det">ABI từ APK${esc(abiDetail)}</span>${iconLabel}</div>
     </div>${uploadError}`;
 }
 
@@ -251,15 +266,7 @@ function uploadFileRows(upload) {
   if (!upload.files.length) return "";
   return upload.files
     .map((file) => {
-      const meta = ABI_META[file.abi] || { label: file.abi, cls: "more" };
       const percent = Math.round((file.progress || 0) * 100);
-      const options = ABI_ORDER.map(
-        (abi) =>
-          `<option value="${abi}" ${abi === file.abi ? "selected" : ""}>${ABI_META[abi].label}</option>`,
-      ).join("");
-      const overridden = Boolean(
-        file.metadata && file.abi !== file.metadata.artifactAbi,
-      );
       const statusPill =
         file.status === "inspecting"
           ? `<span class="fstat">đang đọc…</span>`
@@ -268,11 +275,10 @@ function uploadFileRows(upload) {
             : file.previewUnavailable
               ? `<span class="fstat muted">không xem trước</span>`
               : "";
-      const locked = upload.running || upload.done || file.status === "inspecting";
       return `
       <div class="file ${percent >= 100 ? "done" : ""} ${esc(file.status)}" data-file="${esc(file.id)}">
         <div class="f1">
-          <span class="abi ${meta.cls}">${esc(meta.label)}</span>
+          ${fileIconHTML(file)}
           <span class="nm">${esc(file.name)}</span>
           <span class="sz">${fmtSize(file.sizeBytes)}</span>
           ${statusPill}
@@ -282,10 +288,8 @@ function uploadFileRows(upload) {
               : `<button class="rm" data-act="rmFile" data-file="${esc(file.id)}" title="Bỏ tệp">${svg("close", 10)}</button>`
           }
         </div>
-        ${filePreviewHTML(file)}
+        ${fileMetadataHTML(file)}
         <div class="fab">
-          <select data-act="fileAbi" data-file="${esc(file.id)}" class="${overridden ? "override" : ""}" title="ABI đọc từ APK được ưu tiên; đổi tay sẽ gửi allow_mismatch=abi." ${locked ? "disabled" : ""}>${options}</select>
-          ${overridden ? `<span class="ovr">đã sửa</span>` : ""}
           <span class="pr">${percent}%</span>
           ${file.sha256 ? `<span class="hashok">${svg("check", 11)} sha ${esc(shortSha(file.sha256))}</span>` : ""}
         </div>
@@ -297,8 +301,10 @@ function uploadFileRows(upload) {
 
 export function uploadBlocked(upload) {
   if (!upload) return true;
-  if (upload.running) return true;
+  if (upload.running || upload.done) return true;
+  if (upload.pendingReplace) return true;
   if (upload.inspecting || upload.consistency?.inspecting) return true;
+  if (!upload.files?.length) return true;
   return (upload.consistency?.fatal?.length || 0) > 0;
 }
 
@@ -309,30 +315,33 @@ function alertItems(items) {
 function uploadAlertsHTML(upload) {
   const fatal = upload.consistency?.fatal || [];
   const warnings = upload.consistency?.warnings || [];
-  const hint = upload.packageHint
-    ? `<div class="upload-alert info">${esc(upload.packageHint)}</div>`
-    : "";
-  const mismatch = upload.allowMismatch?.length
-    ? `<div class="upload-alert info">Sẽ gửi <span class="mono">allow_mismatch=${esc(upload.allowMismatch.join(","))}</span> cho máy chủ.</div>`
-    : "";
   const fatalHtml = fatal.length
     ? `<div class="upload-alert fatal"><b>Chưa thể tải lên</b><ul>${alertItems(fatal)}</ul></div>`
     : "";
   const warningHtml = warnings.length
     ? `<div class="upload-alert warn"><b>Cảnh báo</b><ul>${alertItems(warnings)}</ul></div>`
     : "";
-  return hint + fatalHtml + warningHtml + mismatch;
+  const replace = upload.pendingReplace
+    ? `<div class="upload-alert warn"><b>Phiên bản ${esc(upload.pendingReplace.version)} đã có ABI</b>
+        <div>${upload.pendingReplace.replacedAbis
+          .map((abi) => `<span class="abi ${ABI_META[abi]?.cls || "more"}">${esc(ABI_META[abi]?.label || abi)}</span>`)
+          .join(" ")} sẽ bị thay thế.</div>
+        <button class="mini navy" data-act="confirmReplace" style="margin-top:8px">${svg("check", 12)} Thay thế ABI ${esc(upload.pendingReplace.replacedAbis.join(", "))}</button>
+      </div>`
+    : "";
+  const iconWarning = upload.iconWarning
+    ? `<div class="upload-alert warn">${esc(upload.iconWarning)}</div>`
+    : "";
+  return fatalHtml + warningHtml + replace + iconWarning;
 }
 
-/** Patch the alert block and button after a form field changes (no re-render). */
+/** Patch the alert block and button after the date/notes change (no re-render). */
 export function updateUploadAlertsDOM(state) {
   const upload = state.modal?.upload;
   if (!upload) return;
-  refreshUploadValidation(upload, appForUpload(state, upload));
+  refreshUploadValidation(upload, state.catalog, upload.expectedAppId);
   const alerts = document.getElementById("upAlerts");
   if (alerts) alerts.innerHTML = uploadAlertsHTML(upload);
-  const appHint = document.getElementById("upAppHint");
-  if (appHint) appHint.textContent = upload.packageWarning || "";
   const button = document.getElementById("uploadBtn");
   if (button) button.disabled = uploadBlocked(upload);
   const hint = document.getElementById("upFootHint");
@@ -340,28 +349,77 @@ export function updateUploadAlertsDOM(state) {
 }
 
 function uploadFootHint(upload) {
-  if (upload.done) return "Đã cập nhật danh mục và manifest.";
-  if (upload.running) return "Không đóng cửa sổ khi đang tải.";
-  if (upload.inspecting || upload.consistency?.inspecting) {
-    return "Đang đọc metadata APK trong trình duyệt…";
-  }
-  if (upload.consistency?.fatal?.length) {
-    return "Sửa lỗi APK bên trái trước khi tải lên.";
-  }
-  return "APK được đọc tại chỗ trước khi gửi; máy chủ vẫn xác minh lại.";
+  if (upload.done) return "Hoàn tất.";
+  if (upload.running) return "Đang tải lên…";
+  if (upload.pendingReplace) return "Xác nhận thay thế ABI để tiếp tục.";
+  if (upload.inspecting || upload.consistency?.inspecting) return "Đang đọc APK…";
+  if (upload.consistency?.fatal?.length) return "Sửa lỗi trước khi tải lên.";
+  return "";
+}
+
+function versionLine(metadata) {
+  if (!metadata) return "—";
+  const name = effectiveVersionName(metadata) ?? "—";
+  return `v${name} · code ${metadata.versionCode}`;
+}
+
+function iconPairHTML(upload, target) {
+  const file = upload.files.find((candidate) => candidate.iconPreview?.previewUrl);
+  const apkIcon = file
+    ? `<img src="${esc(file.iconPreview.previewUrl)}" alt="">`
+    : `<span class="letter">${svg("image", 18)}</span>`;
+  const app = target?.app;
+  const appIcon = app?.iconUrl
+    ? `<img src="${esc(app.iconUrl)}" alt="">`
+    : `<span class="letter">${esc(initialOf(app || { name: "?" }))}</span>`;
+  return `
+    <div class="iconpair">
+      <div class="icbox"><div class="icbig" style="background:${app?.color || "#FFF1ED"}">${apkIcon}</div><span class="iclabel">APK</span></div>
+      ${
+        app
+          ? `<div class="icbox"><div class="icbig" style="background:${app.color}">${appIcon}</div><span class="iclabel">Hiện tại</span></div>`
+          : ""
+      }
+    </div>`;
+}
+
+function uploadSummaryHTML(state, upload) {
+  const target = upload.target || upload.consistency?.target || resolveUploadTarget(upload, state.catalog, upload.expectedAppId);
+  const metadata = upload.consistency?.detected || firstInspectedMetadata(upload);
+  const targetName = target?.app?.name || target?.name || (target?.create ? "Ứng dụng mới" : "—");
+  const targetId = target?.app?.id || target?.appId || target?.idHint || "";
+  const packageName = metadata?.packageName || target?.packageName || "";
+  const abis = metadata ? (metadata.abis.length ? metadata.abis : ["universal"]) : [];
+  const flags = metadata
+    ? [
+        metadata.debuggable ? "debuggable" : "",
+        metadata.testOnly ? "testOnly" : "",
+        metadata.configSplit ? "config split" : "",
+      ]
+        .filter(Boolean)
+        .join(", ")
+    : "";
+  return `
+    <div class="upsummary">
+      ${iconPairHTML(upload, target)}
+      <div class="field"><label>Ứng dụng</label>
+        <div class="readbox"><b>${esc(targetName)}</b>${targetId ? `<span class="mono">${esc(targetId)}</span>` : ""}</div>
+      </div>
+      <div class="kv"><span>Package</span><b class="mono-ellipsis">${esc(packageName || "—")}</b></div>
+      <div class="kv"><span>Phiên bản</span><b>${esc(versionLine(metadata))}</b></div>
+      <div class="kv"><span>minSdk / targetSdk</span><b>${metadata?.minSdk ?? "—"} / ${metadata?.targetSdk ?? "—"}</b></div>
+      <div class="kv"><span>ABI</span><b>${abis.map((abi) => `<span class="abi ${ABI_META[abi]?.cls || "more"}">${esc(ABI_META[abi]?.label || abi)}</span>`).join(" ") || "—"}</b></div>
+      ${
+        metadata?.icon
+          ? `<div class="kv"><span>Icon APK</span><b>${esc(upload.files.find((file) => file.iconPreview?.label)?.iconPreview?.label || describeIcon(metadata.icon))}</b></div>`
+          : ""
+      }
+      ${flags ? `<div class="kv"><span>Cờ</span><b>${esc(flags)}</b></div>` : ""}
+    </div>`;
 }
 
 function uploadModal(state) {
   const upload = state.modal.upload;
-  const app = appForUpload(state, upload);
-  if (!app) return overlay(`<div class="dbody">Không còn ứng dụng để tải lên.</div>`, 620);
-  const disabled = upload.running || upload.done ? "disabled" : "";
-  const appOptions = state.catalog
-    .map(
-      (candidate) =>
-        `<option value="${esc(candidate.id)}" ${candidate.id === upload.appId ? "selected" : ""}>${esc(candidate.name)}, ${esc(candidate.id)}</option>`,
-    )
-    .join("");
   const blocked = uploadBlocked(upload);
   const overallText = upload.done
     ? "Hoàn tất"
@@ -376,23 +434,21 @@ function uploadModal(state) {
     : upload.inspecting || upload.consistency?.inspecting
       ? `<span class="spinner"></span> Đang đọc APK…`
       : `Tải lên${upload.files.length ? ` ${upload.files.length} tệp` : ""}`;
+  const disabled = upload.running || upload.done ? "disabled" : "";
 
   return overlay(
     `
     <div class="dhead">
-      <div><div class="kick">Phát hành</div><h2>Tải bản dựng lên</h2>
-        <p>APK được đọc ngay trong trình duyệt để lấy package, version và ABI trước khi gửi.</p></div>
+      <div><div class="kick">Phát hành</div><h2>Tải bản dựng lên</h2></div>
       ${closeButton()}
     </div>
     <div class="dbody">
       <div class="uploadgrid">
         <div>
-          <div class="drop ${upload.files.length ? "has" : ""}" id="dropzone" data-act="pickFiles" style="${upload.files.length ? "min-height:150px" : ""}">
+          <div class="drop ${upload.files.length ? "has" : ""}" id="dropzone" data-act="pickFiles" style="${upload.files.length ? "min-height:130px" : ""}">
             <div class="up">${svg("upload", 24)}</div>
             <h3>${upload.files.length ? "Thả thêm APK" : "Thả APK vào đây"}</h3>
-            <p>Kéo một hoặc nhiều tệp .apk. Dashboard đọc AndroidManifest.xml tại chỗ, không tải tệp lên trước.</p>
             <button class="btn btn-ghost pick" data-act="pickFiles">Chọn tệp</button>
-            <div class="tiny">Mỗi ABI chỉ giữ một tệp. Giới hạn dung lượng do máy chủ quy định.</div>
           </div>
           <div class="files" id="fileList">${uploadFileRows(upload)}</div>
           <div id="upAlerts">${uploadAlertsHTML(upload)}</div>
@@ -402,37 +458,16 @@ function uploadModal(state) {
               : ""
           }
           <div class="upload-error" id="upError">${esc(upload.error || "")}</div>
-          <div class="up-hint"><b>Bản nháp trước, APK sau.</b> Phiên bản chỉ xuất hiện trong app Android khi có APK đầu tiên.</div>
           <input type="file" id="fileInput" multiple accept=".apk,application/vnd.android.package-archive" class="sr">
         </div>
         <div class="form">
-          <div class="field"><label for="upApp">Ứng dụng</label>
-            <select id="upApp" ${disabled}>${appOptions}</select>
-            <div class="hint" id="upAppHint" style="color:var(--danger)">${esc(upload.packageWarning)}</div>
-          </div>
-          <div class="f2">
-            <div class="field"><label for="upVersion">Tên phiên bản</label>
-              <input id="upVersion" value="${esc(upload.versionName)}" spellcheck="false" ${disabled}>
-              <div class="hint">versionName, ví dụ 1.5.0</div>
-            </div>
-            <div class="field"><label for="upCode">Version code</label>
-              <input id="upCode" type="number" min="1" value="${esc(upload.versionCode)}" ${disabled}>
-              <div class="hint">số nguyên tăng dần</div>
-            </div>
-          </div>
-          <div class="f2">
-            <div class="field"><label for="upMinSdk">minSdk</label>
-              <input id="upMinSdk" type="number" min="1" value="${esc(upload.minSdk)}" ${disabled}>
-            </div>
-            <div class="field"><label for="upDate">Ngày phát hành</label>
-              <input id="upDate" type="date" value="${esc(upload.date)}" ${disabled}>
-            </div>
+          ${uploadSummaryHTML(state, upload)}
+          <div class="field"><label for="upDate">Ngày phát hành</label>
+            <input id="upDate" type="date" value="${esc(upload.date)}" ${disabled}>
           </div>
           <div class="field"><label for="upNotes">Ghi chú phát hành</label>
             <textarea id="upNotes" placeholder="Điều gì thay đổi trong bản này?" ${disabled}>${esc(upload.notes)}</textarea>
           </div>
-          <div class="switch"><input type="checkbox" checked disabled> Tạo bản nháp trước, gắn APK sau</div>
-          <div class="hint" style="font-size:12px;line-height:1.55;color:var(--mute)">APK được băm SHA-256 khi lên máy chủ. Bản nháp chỉ hiện ở quản trị.</div>
         </div>
       </div>
     </div>
@@ -486,6 +521,10 @@ export function updateUploadProgressDOM(state) {
   }
 }
 
+export function disposeUploadPreviews(upload) {
+  for (const file of upload?.files || []) disposeFileIcon(file);
+}
+
 /* -------------------------------------------------------------------- icon */
 
 export function openIcon(state, appId) {
@@ -533,7 +572,6 @@ function iconModal(state) {
             <button class="btn btn-ghost" data-act="pickIcon" ${icon.busy ? "disabled" : ""}>Chọn ảnh</button>
             <input type="file" id="iconInput" accept="image/png,image/jpeg,image/webp" class="sr">
           </div>
-          <div class="icnote">Icon được lưu vào <span class="mono">apps/${esc(app.id)}/</span> và trả về qua <span class="mono">GET /apps/${esc(app.id)}/icon</span>. App Android cache 60 giây.</div>
           <div class="icrow">
             <button class="mini ghost" data-act="letterIcon" ${icon.busy ? "disabled" : ""}>${svg("file", 12)} Dùng chữ cái đầu</button>
             ${app.iconUrl ? `<button class="mini danger" data-act="removeIcon" ${icon.busy ? "disabled" : ""}>${svg("trash", 12)} Xoá icon hiện tại</button>` : ""}
@@ -543,7 +581,7 @@ function iconModal(state) {
       </div>
     </div>
     <div class="dfoot">
-      <span class="hint">${icon.busy ? "Đang lưu icon…" : "Ảnh được thay nguyên tử, không ghi đè manifest."}</span>
+      <span class="hint">${icon.busy ? "Đang lưu icon…" : ""}</span>
       <span class="sp"></span>
       <button class="btn btn-ghost" data-act="closeModal" ${icon.busy ? "disabled" : ""}>Huỷ</button>
       <button class="btn btn-primary" data-act="saveIcon" ${icon.busy ? "disabled" : ""}>${icon.busy ? `<span class="spinner"></span> Đang lưu…` : "Lưu icon"}</button>
@@ -591,8 +629,7 @@ function appFormModal(state) {
   return overlay(
     `
     <div class="dhead">
-      <div><div class="kick">${editing ? "Thông tin" : "Ứng dụng mới"}</div><h2>${editing ? "Sửa thông tin ứng dụng" : "Tạo ứng dụng"}</h2>
-        <p>${editing ? "Thay đổi được ghi vào app.json, giữ nguyên các trường lạ." : "Ứng dụng chưa có bản dựng sẽ chỉ hiện trong quản trị cho đến khi có APK."}</p></div>
+      <div><div class="kick">${editing ? "Thông tin" : "Ứng dụng mới"}</div><h2>${editing ? "Sửa thông tin ứng dụng" : "Tạo ứng dụng"}</h2></div>
       ${closeButton()}
     </div>
     <div class="dbody">
@@ -617,7 +654,7 @@ function appFormModal(state) {
       <div class="inline-error" id="formErr">${esc(form.error || "")}</div>
     </div>
     <div class="dfoot">
-      <span class="hint">${editing ? "Chỉ metadata thay đổi; APK và phiên bản giữ nguyên." : "Có thể đổi icon sau khi tạo."}</span>
+      <span class="hint"></span>
       <span class="sp"></span>
       <button class="btn btn-ghost" data-act="closeModal" ${form.busy ? "disabled" : ""}>Huỷ</button>
       <button class="btn btn-primary" data-act="saveApp" ${form.busy ? "disabled" : ""}>${form.busy ? `<span class="spinner"></span> Đang lưu…` : editing ? "Lưu thay đổi" : "Tạo ứng dụng"}</button>
@@ -667,7 +704,6 @@ function versionFormModal(state) {
         </div>
         <div class="field wide"><label for="vfDate">Ngày phát hành</label>
           <input id="vfDate" type="date" value="${esc(form.date)}" ${form.busy ? "disabled" : ""}>
-          <div class="hint">Để trống để máy chủ dùng thời gian sửa tệp.</div>
         </div>
         <div class="field wide"><label for="vfNotes">Ghi chú phát hành</label>
           <textarea id="vfNotes" placeholder="Điều gì thay đổi trong bản này?" ${form.busy ? "disabled" : ""}>${esc(form.notes)}</textarea>
@@ -676,7 +712,7 @@ function versionFormModal(state) {
       <div class="inline-error" id="formErr">${esc(form.error || "")}</div>
     </div>
     <div class="dfoot">
-      <span class="hint">Chỉ metadata thay đổi; APK giữ nguyên.</span>
+      <span class="hint"></span>
       <span class="sp"></span>
       <button class="btn btn-ghost" data-act="closeModal" ${form.busy ? "disabled" : ""}>Huỷ</button>
       <button class="btn btn-primary" data-act="saveVersion" ${form.busy ? "disabled" : ""}>${form.busy ? `<span class="spinner"></span> Đang lưu…` : "Lưu thay đổi"}</button>
@@ -735,6 +771,7 @@ export function curlCode(state, app, versionName) {
     ? app.versions.find((candidate) => candidate.name === versionName)
     : null;
   const name = versionName || app.versions[0]?.name || "1.0.0";
+  const encodedName = encodeURIComponent(name);
   const code = version?.code || (app.versions[0]?.code || 0) + 1 || 1;
   const minSdk = version?.minSdk ?? app.versions[0]?.minSdk ?? 26;
   const abis = version?.artifacts?.length
@@ -742,12 +779,13 @@ export function curlCode(state, app, versionName) {
     : ["arm64-v8a", "armeabi-v7a"];
   const artifactCmds = abis
     .map(
-      (abi) => `curl -X PUT "$MTF_URL/api/v1/apps/${app.id}/versions/${name}/artifacts/${abi}" \\
+      (abi) => `curl -X PUT "$MTF_URL/api/v1/apps/${app.id}/versions/${encodedName}/artifacts/${abi}" \\
   -H 'content-type: application/vnd.android.package-archive' \\
   -H "X-Management-Key: $MTF_KEY" \\
   --data-binary @app-${abi}.apk`,
     )
     .join("\n\n");
+  const payload = JSON.stringify({ versionName: name, versionCode: code, minSdk });
   return `export MTF_URL='${base}'
 export MTF_KEY='<management_key>'
 
@@ -755,10 +793,15 @@ export MTF_KEY='<management_key>'
 curl -X POST "$MTF_URL/api/v1/apps/${app.id}/versions" \\
   -H 'content-type: application/json' \\
   -H "X-Management-Key: $MTF_KEY" \\
-  -d '{"versionName":"${name}","versionCode":${code},"minSdk":${minSdk}}'
+  -d '${payload}'
 
 # 2. Đẩy APK cho từng ABI
-${artifactCmds}`;
+${artifactCmds}
+
+# CLI
+npx my-testflight-cli@latest login "$MTF_URL"
+npx my-testflight-cli@latest apk inspect app-arm64-v8a.apk --json
+npx my-testflight-cli@latest publish app-arm64-v8a.apk --app-id ${app.id}`;
 }
 
 function curlModal(state) {
@@ -769,7 +812,7 @@ function curlModal(state) {
   return overlay(
     `
     <div class="dhead"><div><div class="kick">CI / terminal</div><h2>Lệnh phát hành</h2>
-      <p>${esc(app.name)}${curl.versionName ? `, v${esc(curl.versionName)}` : ""}. Chạy từ máy có APK, không cần mở web.</p></div>
+      <p>${esc(app.name)}${curl.versionName ? `, v${esc(curl.versionName)}` : ""}</p></div>
       ${closeButton()}</div>
     <div class="dbody"><pre class="curl">${esc(code)}</pre>
       <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
@@ -777,7 +820,7 @@ function curlModal(state) {
         <span style="font-size:12px;color:var(--mute);align-self:center">Thay <span class="mono">&lt;management_key&gt;</span> bằng token trong Cài đặt.</span>
       </div>
     </div>
-    <div class="dfoot"><span class="hint">API ghi cần header X-Management-Key. Tạo bản nháp trước, rồi PUT từng ABI.</span><span class="sp"></span>
+    <div class="dfoot"><span class="sp"></span>
       <button class="btn btn-ghost" data-act="closeModal">Đóng</button></div>`,
     720,
   );
@@ -807,10 +850,7 @@ export function modalHTML(state) {
 
 export function closeModal(state, force = false) {
   if (state.modal?.type === "upload" && state.modal.upload.running && !force) return false;
+  if (state.modal?.type === "upload") disposeUploadPreviews(state.modal.upload);
   state.modal = null;
   return true;
-}
-
-export function validateVersionName(value) {
-  return ID_PATTERN.test(String(value || ""));
 }

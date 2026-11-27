@@ -48,7 +48,6 @@ export function listPageHTML(state) {
       <div>
         <div class="kick">Thư viện phát hành nội bộ</div>
         <h1>Mọi bản dựng,<br><em>một kệ.</em></h1>
-        <p>Đẩy bản dựng mới, đổi icon, và nhìn thấy ngay mỗi phiên bản đang phục vụ những kiến trúc nào.</p>
       </div>
       <div class="mstats" id="mastStats">${mastStatsHTML(state)}</div>
     </div>
@@ -151,7 +150,6 @@ function addCardHTML() {
   <button class="appcard empty" data-act="newApp">
     <span class="plus">${svg("plus", 20)}</span>
     <h3>Thêm ứng dụng</h3>
-    <p>Tạo app mới rồi đẩy APK đầu tiên lên.</p>
   </button>`;
 }
 

@@ -3,13 +3,18 @@ import assert from "node:assert/strict";
 
 import { ApkInspectError, artifactAbiOf, inspectApk } from "../src/apk-inspect.js";
 import {
+  REAL_ICON_EXPECTED,
   REAL_MANIFEST_EXPECTED,
+  buildAdaptiveXml,
   buildManifest,
+  buildResourcesTable,
+  buildVectorXml,
   buildZip,
   makeApk,
   patchCentralEntry,
   patchEocd,
   realApk,
+  realApkWithResources,
   withZip64Locator,
 } from "./fixtures.mjs";
 
@@ -263,4 +268,169 @@ test("reports preview_unavailable when DecompressionStream is absent", async () 
   } finally {
     globalThis.DecompressionStream = original;
   }
+});
+
+
+/* ---------------------------------------------------- resources.arsc / icon */
+
+test("resolves the real label and adaptive icon descriptor", async () => {
+  const metadata = await inspectApk(realApkWithResources());
+  assert.equal(metadata.label, REAL_ICON_EXPECTED.label);
+  assert.equal(metadata.versionNameSource, "literal");
+  assert.deepEqual(metadata.icon, {
+    kind: "adaptive",
+    entry: REAL_ICON_EXPECTED.adaptiveEntry,
+    resourceId: REAL_ICON_EXPECTED.adaptiveResourceId,
+  });
+});
+
+test("resolves a resource-backed versionName", async () => {
+  const table = buildResourcesTable({
+    types: [
+      {
+        name: "string",
+        id: 14,
+        entries: [
+          {
+            key: "version_name",
+            configs: [{ config: {}, value: { type: "string", value: "2.4.0" } }],
+          },
+        ],
+      },
+    ],
+  });
+  const apk = makeApk({
+    manifest: buildManifest({
+      packageName: "com.example.ref",
+      versionCode: 9,
+      versionNameRef: true,
+      versionNameRefId: 0x7f0e0000,
+    }),
+    extras: [{ name: "resources.arsc", data: table, method: 0 }],
+  });
+  const metadata = await inspectApk(apk);
+  assert.equal(metadata.versionName, "2.4.0");
+  assert.equal(metadata.versionNameSource, "resource");
+});
+
+test("classifies a synthesized adaptive icon and its nested resources", async () => {
+  const table = buildResourcesTable({
+    types: [
+      {
+        name: "color",
+        id: 4,
+        entries: [
+          {
+            key: "bg",
+            configs: [{ config: {}, value: { type: "color", value: 0xffff4f40 } }],
+          },
+        ],
+      },
+      {
+        name: "drawable",
+        id: 6,
+        entries: [
+          {
+            key: "fg",
+            configs: [{ config: {}, value: { type: "string", value: "res/vector.xml" } }],
+          },
+        ],
+      },
+      {
+        name: "mipmap",
+        id: 11,
+        entries: [
+          {
+            key: "ic_launcher",
+            configs: [
+              { config: { density: 0xfffe }, value: { type: "string", value: "res/adaptive.xml" } },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const apk = makeApk({
+    manifest: buildManifest({
+      packageName: "com.example.icon",
+      iconRef: 0x7f0b0000,
+      labelRef: null,
+    }),
+    extras: [
+      { name: "resources.arsc", data: table, method: 0 },
+      {
+        name: "res/adaptive.xml",
+        data: buildAdaptiveXml({
+          background: { ref: 0x7f040000 },
+          foreground: { ref: 0x7f060000 },
+        }),
+        method: 0,
+      },
+      {
+        name: "res/vector.xml",
+        data: buildVectorXml({
+          paths: [{ pathData: "M0,0h10v10z", fillColor: 0xffffffff }],
+        }),
+        method: 0,
+      },
+    ],
+  });
+  const metadata = await inspectApk(apk);
+  assert.deepEqual(metadata.icon, {
+    kind: "adaptive",
+    entry: "res/adaptive.xml",
+    resourceId: 0x7f0b0000,
+  });
+});
+
+test("picks the highest-density raster icon when no XML exists", async () => {
+  const table = buildResourcesTable({
+    types: [
+      {
+        name: "mipmap",
+        id: 11,
+        entries: [
+          {
+            key: "ic_launcher",
+            configs: [
+              { config: { density: 160 }, value: { type: "string", value: "res/mdpi.png" } },
+              { config: { density: 640 }, value: { type: "string", value: "res/xxxhdpi.png" } },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const apk = makeApk({
+    manifest: buildManifest({ packageName: "com.example.raster", iconRef: 0x7f0b0000 }),
+    extras: [
+      { name: "resources.arsc", data: table, method: 0 },
+      { name: "res/mdpi.png", data: new Uint8Array([1]), method: 0 },
+      { name: "res/xxxhdpi.png", data: new Uint8Array([2]), method: 0 },
+    ],
+  });
+  const metadata = await inspectApk(apk);
+  assert.equal(metadata.icon.kind, "raster");
+  assert.equal(metadata.icon.entry, "res/xxxhdpi.png");
+  assert.equal(metadata.icon.contentType, "image/png");
+  assert.equal(metadata.icon.density, 640);
+});
+
+test("a corrupt resources.arsc degrades to no label/icon without failing", async () => {
+  const apk = makeApk({
+    manifest: buildManifest({ packageName: "com.example.broken", iconRef: 0x7f0b0000 }),
+    extras: [{ name: "resources.arsc", data: new Uint8Array([1, 2, 3, 4]), method: 0 }],
+  });
+  const metadata = await inspectApk(apk);
+  assert.equal(metadata.packageName, "com.example.broken");
+  assert.equal(metadata.label, null);
+  assert.equal(metadata.icon, null);
+});
+
+test("versionNameSource is none when the manifest has no versionName", async () => {
+  const metadata = await inspectApk(
+    makeApk({ manifest: buildManifest({ versionName: null, versionNameRef: false }) }),
+  );
+  assert.equal(metadata.versionName, null);
+  assert.equal(metadata.versionNameSource, "none");
 });
